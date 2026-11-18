@@ -110,7 +110,29 @@ if (-not (Test-Path -LiteralPath $LogFile)) {
 }
 
 if (-not $NoStart) {
-    Start-Process -FilePath $AppExe -WindowStyle Hidden
+    $stdoutFile = Join-Path $AppDir 'start_stdout.log'
+    $stderrFile = Join-Path $AppDir 'start_stderr.log'
+
+    try {
+        $proc = Start-Process -FilePath $AppExe -WindowStyle Hidden -PassThru `
+            -RedirectStandardOutput $stdoutFile `
+            -RedirectStandardError $stderrFile
+
+        Start-Sleep -Seconds 3
+
+        if (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue) {
+            Write-Host 'zя запущен: значок должен появиться в трее.'
+        } else {
+            Write-Host 'zя не запустился как resident app. Проверьте:'
+            if (Test-Path -LiteralPath $stderrFile) {
+                Get-Content -LiteralPath $stderrFile -TotalCount 20
+            }
+            Write-Host "Можно запустить вручную: $AppExe"
+        }
+    } catch {
+        Write-Host "Could not start zя automatically: $($_.Exception.Message)"
+        Write-Host "Можно запустить вручную: $AppExe"
+    }
 }
 
 Write-Host ''
@@ -118,4 +140,5 @@ Write-Host 'zя installed.'
 Write-Host "App file: $AppExe"
 Write-Host "Settings folder: $AppDir"
 Write-Host 'Hotkeys: Break, Ctrl+Break, Shift+Break, Ctrl+Alt+P'
+Write-Host 'Menu: Исключить активное окно / Исключить папку активного окна / Исключения'
 Write-Host 'Uninstall: Uninstall.ps1'
