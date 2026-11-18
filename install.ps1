@@ -45,7 +45,7 @@ function Get-ReleaseDownloadUrl() {
         return $release.assets[0].browser_download_url
     }
 
-    return "https://github.com/$Repo/releases/download/v0.1.0/zya.exe"
+    return "https://github.com/$Repo/releases/download/v0.1.1/zya_patched.exe"
 }
 
 function Find-BuiltExecutable() {
