@@ -1364,7 +1364,10 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
 /// "double switches". The named mutex lives for the whole process.
 pub fn another_instance_running() -> bool {
     unsafe {
-        let name: Vec<u16> = "Global\\ZyaLayoutGuard\0".encode_utf16().collect();
+        // The Local namespace works for ordinary user processes; creating an
+        // object under `Global\` needs SeCreateGlobalPrivilege and fails with
+        // access denied, which would silently disable the guard.
+        let name: Vec<u16> = "Local\\ZyaLayoutGuard\0".encode_utf16().collect();
         match CreateMutexW(None, true, PCWSTR(name.as_ptr())) {
             Ok(_handle) => GetLastError() == ERROR_ALREADY_EXISTS,
             Err(_) => false,

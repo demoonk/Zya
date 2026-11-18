@@ -38,16 +38,20 @@ def get_font():
 
 
 def draw_text(text, filled):
+    """Render the layout code at its natural aspect ratio, then center it in 32x32.
+
+    The previous version stretched the cropped glyph to the whole square, which
+    squashed `RU`/`EN` horizontally. Fitting by width and keeping the proportion
+    makes the letters read as normal letters.
+    """
     target = 32
     font = get_font()
-    canvas = Image.new("RGBA", (220, 220), (0, 0, 0, 0))
+    canvas = Image.new("RGBA", (300, 300), (0, 0, 0, 0))
     d = ImageDraw.Draw(canvas)
 
-    stroke_width = 2 if filled else 2
-    text_pos = (10, 10)
+    stroke_width = 2
+    text_pos = (30, 30)
 
-    # Draw the layout code once, then add a thin outline for readability on both
-    # dark and light taskbars.
     if filled:
         d.text(
             text_pos,
@@ -68,17 +72,23 @@ def draw_text(text, filled):
         )
 
     bbox = d.textbbox(text_pos, text, font=font, stroke_width=stroke_width)
-    glyph_box = Image.alpha_composite(canvas, Image.new("RGBA", canvas.size, (0, 0, 0, 0))).crop(bbox)
+    glyph = canvas.crop(bbox)
 
-    w, h = glyph_box.size
+    w, h = glyph.size
     if w <= 0 or h <= 0:
-        return glyph_box.resize((target, target), Image.LANCZOS)
+        return glyph.resize((target, target), Image.LANCZOS)
 
-    # Stretch the cropped glyph to the full 32x32 canvas: maximum possible
-    # height and maximum possible width.
-    scaled = glyph_box.resize((target, target), Image.LANCZOS)
+    # Keep the glyph's own proportion: it may touch the left and right edges of
+    # the icon, but it is never stretched.
+    margin = 1
+    available = target - 2 * margin
+    scale = min(available / w, available / h)
+    nw = max(1, round(w * scale))
+    nh = max(1, round(h * scale))
+    scaled = glyph.resize((nw, nh), Image.LANCZOS)
+
     out = Image.new("RGBA", (target, target), (0, 0, 0, 0))
-    out.paste(scaled, (0, 0))
+    out.paste(scaled, ((target - nw) // 2, (target - nh) // 2))
     return out
 
 
