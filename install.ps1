@@ -11,10 +11,10 @@ $ErrorActionPreference = 'Stop'
 $Repo = 'demoonk/Zya'
 $Root = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $Project = Join-Path $Root 'abrakadabra'
-$InstallDir = Join-Path $env:APPDATA 'Abrakadra'
-$ConfigDir = Join-Path $env:APPDATA 'zя'
-$ConfigFile = Join-Path $ConfigDir 'config.json'
-$InstalledExe = Join-Path $InstallDir 'zya.exe'
+$InstallDir = Join-Path $env:APPDATA 'zя'
+$ConfigDir = $InstallDir
+$ConfigFile = Join-Path $InstallDir 'config.json'
+$InstalledExe = Join-Path $InstallDir 'zя.exe'
 $TempDir = Join-Path $env:TEMP 'zя-install'
 
 function Invoke-GitHubJson([string] $url) {
@@ -68,7 +68,7 @@ function Get-ReleaseDownloadUrl() {
         return $release.assets[0].browser_download_url
     }
 
-    return "https://github.com/$Repo/releases/download/v0.1.1/zya.exe"
+    return "https://github.com/$Repo/releases/download/v0.1.1/z.exe"
 }
 
 function Find-BuiltExecutable() {
@@ -315,21 +315,12 @@ Get-Process |
         }
     }
 
-try {
-    & $InstalledExe install | Out-Null
-} catch {
-    Write-Host 'Built-in install command failed; continuing with the copied executable.'
-}
-
-$finalExe = Join-Path $ConfigDir 'zя.exe'
-$runExe = if (Test-Path -LiteralPath $finalExe) { $finalExe } else { $InstalledExe }
-
-Start-Process -FilePath $runExe -ArgumentList 'run', 'headless' -WindowStyle Hidden
+Start-Process -FilePath $InstalledExe -WindowStyle Hidden
 
 Write-Host ''
 Write-Host 'zя installed.'
-Write-Host "Copy in config folder: $finalExe"
-Write-Host "Installer copy: $InstalledExe"
+Write-Host "App file: $InstalledExe"
+Write-Host "Settings folder: $ConfigDir"
 Write-Host 'Autostart: yes'
 Write-Host 'Hotkeys: Break, Ctrl+Break, Shift+Break, Ctrl+Alt+P'
 Write-Host 'Uninstall: Uninstall.ps1'

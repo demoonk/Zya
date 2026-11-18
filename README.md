@@ -27,16 +27,16 @@
 
 ## Установка
 
-На обычном компьютере достаточно:
+На обычном компьютере достаточно одной команды:
+
+```powershell
+powershell -NoProfile -Command "irm https://raw.githubusercontent.com/demoonk/Zya/main/install.ps1 | iex"
+```
+
+Если репозиторий уже скачан, можно так:
 
 ```powershell
 .\install.ps1
-```
-
-или двойной клик:
-
-```text
-install.bat
 ```
 
 Установщик сам:

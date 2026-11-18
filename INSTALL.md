@@ -2,28 +2,33 @@
 
 ## Быстрая установка
 
-На обычном Windows-компьютере:
+Одна строка в PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/demoonk/Zya/main/install.ps1 | iex
+```
+
+или из cmd:
+
+```cmd
+powershell -NoProfile -Command "irm https://raw.githubusercontent.com/demoonk/Zya/main/install.ps1 | iex"
+```
+
+Если репозиторий уже скачан:
 
 ```powershell
 .\install.ps1
 ```
 
-или двойной клик:
-
-```text
-install.bat
-```
-
 Установщик работает так:
 
 1. Ищет уже собранный `zя.exe` или `zya.exe` в `abrakadabra/target/release` или `abrakadabra/target/debug`.
-2. Если его нет, скачивает один файл `zya.exe` с GitHub Releases (сейчас v0.1.1: self-contained `zya.exe`, внутри которого embedded-бинарь с крупными иконками).
+2. Если его нет, скачивает один self-contained файл с GitHub Releases (сейчас v0.1.1, asset `z.exe`; внутри embedded-бинарь с крупными иконками).
 3. Проверяет, запущен ли Punto Switcher.
-4. Копирует программу в `%APPDATA%\Abrakadra\zya.exe`.
-5. Запускает встроенную команду `zya.exe install`, которая кладет рабочую копию в `%APPDATA%\zя\zя.exe`.
-6. Создает `%APPDATA%\zя\config.json`, если его нет.
-7. Останавливает старую копию программы, если она уже запущена.
-8. Запускает `zя` в фоновом режиме.
+4. Кладет приложение в `%APPDATA%\zя\zя.exe`.
+5. Создает `%APPDATA%\zя\config.json` и `diario.log`, если их нет.
+6. Останавливает старую копию программы, если она уже запущена.
+7. Запускает `zя.exe` без параметров, то есть в рабочем режиме.
 
 ## Punto Switcher
 
