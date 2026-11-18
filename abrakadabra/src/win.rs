@@ -2,6 +2,7 @@
 //! the word just typed was produced with the wrong layout, rewrites it and
 //! switches the layout.
 
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HGLOBAL, LPARAM, LRESULT, WPARAM};
@@ -1410,6 +1411,107 @@ pub fn set_exclude_processes(list: &[String]) {
 pub fn set_exclude_dirs(list: &[String]) {
     let mut a = app().lock().unwrap();
     a.cfg.exclude_dirs = list.to_vec();
+}
+
+pub fn exclude_processes() -> Vec<String> {
+    app().lock().unwrap().cfg.exclude_processes.clone()
+}
+
+pub fn exclude_dirs() -> Vec<String> {
+    app().lock().unwrap().cfg.exclude_dirs.clone()
+}
+
+/// Full executable path of the currently foreground window, or an empty string.
+pub fn foreground_process_path() -> String {
+    unsafe { foreground_process() }
+}
+
+/// Process/file name of the foreground application, e.g. "chrome.exe".
+pub fn foreground_process_name() -> String {
+    let path = foreground_process_path();
+    Path::new(&path)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
+/// Folder containing the foreground application, e.g. "c:\\program files\\app".
+pub fn foreground_process_dir() -> String {
+    let path = foreground_process_path();
+    Path::new(&path)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
+pub fn add_exclude_process(name: &str) -> bool {
+    let name = name.trim();
+    if name.is_empty() {
+        return false;
+    }
+    let lower = name.to_lowercase();
+    let mut a = app().lock().unwrap();
+    if a
+        .cfg
+        .exclude_processes
+        .iter()
+        .any(|p| p.to_lowercase() == lower)
+    {
+        return false;
+    }
+    a.cfg.exclude_processes.push(name.to_string());
+    crate::config::save(&a.cfg).ok();
+    true
+}
+
+pub fn remove_exclude_process(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    let mut a = app().lock().unwrap();
+    let before = a.cfg.exclude_processes.len();
+    a.cfg.exclude_processes.retain(|p| p.to_lowercase() != lower);
+    if a.cfg.exclude_processes.len() == before {
+        return false;
+    }
+    crate::config::save(&a.cfg).ok();
+    true
+}
+
+pub fn add_exclude_dir(dir: &str) -> bool {
+    let dir = dir.trim();
+    if dir.is_empty() {
+        return false;
+    }
+    let lower = dir.to_lowercase();
+    let mut a = app().lock().unwrap();
+    if a.cfg.exclude_dirs.iter().any(|d| d.to_lowercase() == lower) {
+        return false;
+    }
+    a.cfg.exclude_dirs.push(dir.to_string());
+    crate::config::save(&a.cfg).ok();
+    true
+}
+
+pub fn remove_exclude_dir(dir: &str) -> bool {
+    let lower = dir.to_lowercase();
+    let mut a = app().lock().unwrap();
+    let before = a.cfg.exclude_dirs.len();
+    a.cfg.exclude_dirs.retain(|d| d.to_lowercase() != lower);
+    if a.cfg.exclude_dirs.len() == before {
+        return false;
+    }
+    crate::config::save(&a.cfg).ok();
+    true
+}
+
+pub fn clear_excludes() -> bool {
+    let mut a = app().lock().unwrap();
+    if a.cfg.exclude_processes.is_empty() && a.cfg.exclude_dirs.is_empty() {
+        return false;
+    }
+    a.cfg.exclude_processes.clear();
+    a.cfg.exclude_dirs.clear();
+    crate::config::save(&a.cfg).ok();
+    true
 }
 
 /// True when automatic correction is currently suppressed for the foreground
