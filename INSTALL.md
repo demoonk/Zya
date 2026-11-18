@@ -17,7 +17,7 @@ install.bat
 Установщик работает так:
 
 1. Ищет уже собранный `zя.exe` или `zya.exe` в `abrakadabra/target/release` или `abrakadabra/target/debug`.
-2. Если его нет, скачивает последнюю версию с GitHub Releases.
+2. Если его нет, скачивает последнюю версию с GitHub Releases (сейчас это v0.1.1 с пропатченными крупными иконками).
 3. Проверяет, запущен ли Punto Switcher.
 4. Копирует программу в `%APPDATA%\Abrakadra\zya.exe`.
 5. Запускает встроенную команду `zya.exe install`, которая кладет рабочую копию в `%APPDATA%\zя\zя.exe`.

@@ -41,7 +41,7 @@ install.bat
 
 Установщик сам:
 
-- скачивает последнюю release-версию `zya.exe` с GitHub, если в папке `abrakadabra/target` нет собранного файла;
+- скачивает последнюю release-версию `zya.exe` с GitHub (сейчас v0.1.1, уже с новыми крупными иконками), если в папке `abrakadabra/target` нет собранного файла;
 - проверяет, запущен ли Punto Switcher;
 - копирует программу в `%APPDATA%\Abrakadra\zya.exe`;
 - создает `%APPDATA%\zя\config.json`;
