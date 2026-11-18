@@ -1617,7 +1617,9 @@ pub fn add_dictionary_word(word: &str) -> bool {
         return false;
     }
     a.cfg.whitelist.push(letters);
-    crate::config::save(&a.cfg).ok();
+    if let Err(e) = crate::config::save(&a.cfg) {
+        println!("zя: не удалось сохранить словарь: {e}");
+    }
     true
 }
 
