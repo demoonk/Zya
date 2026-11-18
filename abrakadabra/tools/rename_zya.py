@@ -3,7 +3,7 @@
 
 The crate/binary name stays ASCII (`zya`): MinGW's ld cannot write an output
 file whose name contains non-ASCII characters. The distributable is renamed to
-`zя.exe` by tools/build.ps1 after every build. The repository folder and the
+`z.exe` by tools/build.ps1 after every build. The repository folder and the
 data paths are intentionally left ASCII.
 """
 import sys

@@ -37,21 +37,21 @@ def get_font():
     return ImageFont.load_default()
 
 
-def draw_glyph(glyph, filled):
+def draw_text(text, filled):
     target = 32
     font = get_font()
     canvas = Image.new("RGBA", (220, 220), (0, 0, 0, 0))
     d = ImageDraw.Draw(canvas)
 
-    stroke_width = 3 if filled else 6
+    stroke_width = 3 if filled else 5
     text_pos = (10, 10)
 
-    # Draw once for the glyph, then add a thin outline for readability on both
+    # Draw the layout code once, then add a thin outline for readability on both
     # dark and light taskbars.
     if filled:
         d.text(
             text_pos,
-            glyph,
+            text,
             font=font,
             fill=(255, 255, 255, 255),
             stroke_width=stroke_width,
@@ -60,14 +60,14 @@ def draw_glyph(glyph, filled):
     else:
         d.text(
             text_pos,
-            glyph,
+            text,
             font=font,
             fill=(0, 0, 0, 0),
             stroke_width=stroke_width,
             stroke_fill=(255, 255, 255, 255),
         )
 
-    bbox = d.textbbox(text_pos, glyph, font=font, stroke_width=stroke_width)
+    bbox = d.textbbox(text_pos, text, font=font, stroke_width=stroke_width)
     glyph_box = Image.alpha_composite(canvas, Image.new("RGBA", canvas.size, (0, 0, 0, 0))).crop(bbox)
 
     w, h = glyph_box.size
@@ -75,6 +75,8 @@ def draw_glyph(glyph, filled):
     if w <= 0 or h <= 0:
         return glyph_box.resize((target, target), Image.LANCZOS)
 
+    # The text should be as tall as possible. Width may become narrower than the
+    # square target, so the icon keeps the maximum readable glyph height.
     scale = min(max_target / w, max_target / h)
     new_w = max(1, int(w * scale))
     new_h = max(1, int(h * scale))
@@ -137,14 +139,14 @@ def main():
     os.makedirs(DATA, exist_ok=True)
 
     variants = {
-        "tray_ru_on": ("Я", True),
-        "tray_ru_off": ("Я", False),
-        "tray_en_on": ("A", True),
-        "tray_en_off": ("A", False),
+        "tray_ru_on": ("RU", True),
+        "tray_ru_off": ("RU", False),
+        "tray_en_on": ("EN", True),
+        "tray_en_off": ("EN", False),
     }
 
-    for name, (glyph, filled) in variants.items():
-        img = draw_glyph(glyph, filled)
+    for name, (text, filled) in variants.items():
+        img = draw_text(text, filled)
         img.save(os.path.join(DATA, f"{name}.png"))
         data = dib(img)
         with open(os.path.join(DATA, f"{name}.dib"), "wb") as fh:
@@ -162,7 +164,7 @@ def main():
         if base:
             frames.append(base.resize((s, s), Image.LANCZOS))
         else:
-            frames.append(draw_glyph("Я", True).resize((s, s), Image.LANCZOS))
+            frames.append(draw_text("RU", True).resize((s, s), Image.LANCZOS))
 
     with open(os.path.join(DATA, "app.ico"), "wb") as fh:
         fh.write(ico_bytes(frames))

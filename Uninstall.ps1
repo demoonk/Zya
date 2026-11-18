@@ -22,7 +22,7 @@ Get-Process |
         }
     }
 
-foreach ($value in @('zя', 'zya')) {
+foreach ($value in @('z.exe', 'zя', 'zya', 'z')) {
     try {
         reg delete 'HKCU\Software\Microsoft\Windows\CurrentVersion\Run' /v $value /f | Out-Null
     } catch {

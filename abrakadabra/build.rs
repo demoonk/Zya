@@ -1,9 +1,9 @@
-//! Embed `data/app.ico` into the executable as its application icon.
+//! Embed `data/app.ico` and `data/manifest.xml` into the executable.
 //!
-//! MinGW's `windres` turns the .ico into a COFF object that carries a proper
-//! `.rsrc` section; linking that object into the binary is enough for Explorer
-//! and the task bar to show the icon. If `windres` is not on PATH the build
-//! simply continues without the icon.
+//! MinGW's `windres` turns the .ico and manifest into a COFF object that carries
+//! a proper `.rsrc` section. The icon is used by Explorer and the task bar, while
+//! the manifest asks Windows to launch the app only with administrator rights.
+//! If `windres` is not on PATH the build continues without these resources.
 
 fn main() {
     let out_dir = std::env::var("OUT_DIR").unwrap_or_else(|_| ".".to_string());
@@ -13,17 +13,33 @@ fn main() {
         return;
     }
 
-    let abs = ico
+    let manifest = std::path::Path::new("data/manifest.xml");
+    if !manifest.exists() {
+        std::fs::write(
+            manifest,
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<assembly xmlns=\"urn:schemas-microsoft-com:asm.v1\" manifestVersion=\"1.0\">\n  <trustInfo xmlns=\"urn:schemas-microsoft-com:asm.v2\">\n    <security>\n      <requestedPrivileges xmlns=\"urn:schemas-microsoft-com:asm.v3\">\n        <requestedExecutionLevel level=\"requireAdministrator\" uiAccess=\"false\"/>\n      </requestedPrivileges>\n    </security>\n  </trustInfo>\n</assembly>\n",
+        )
+        .unwrap_or_else(|e| println!("cargo:warning=cannot create data/manifest.xml: {e}"));
+    }
+
+    let abs_icon = ico
         .canonicalize()
         .unwrap_or_else(|_| ico.to_path_buf())
         .to_string_lossy()
         .replace("\\\\?\\", "")
         .replace('\\', "/");
+    let abs_manifest = manifest
+        .canonicalize()
+        .unwrap_or_else(|_| manifest.to_path_buf())
+        .to_string_lossy()
+        .replace("\\\\?\\", "")
+        .replace('\\', "/");
+
     let rc = std::path::PathBuf::from(&out_dir).join("zya.rc");
     let obj = std::path::PathBuf::from(&out_dir).join("zya_icon.obj");
 
-    std::fs::write(&rc, format!("1 ICON \"{abs}\"\n"))
-        .unwrap_or_else(|e| println!("cargo:warning=cannot write icon rc: {e}"));
+    std::fs::write(&rc, format!("1 ICON \"{abs_icon}\"\n1 10 \"{abs_manifest}\"\n"))
+        .unwrap_or_else(|e| println!("cargo:warning=cannot write resource rc: {e}"));
 
     let windres = std::env::var("PATH")
         .unwrap_or_default()

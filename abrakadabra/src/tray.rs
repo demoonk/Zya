@@ -1,8 +1,8 @@
 //! Tray icon + context menu, so the switcher behaves like a real resident app.
 //!
-//! The icon changes with the state: the letter shows the layout the hook is
-//! currently tracking (`Я` = Russian, `Z` = English), the keycap is white while
-//! automatic switching is on and gray while it is off.
+//! The icon changes with the state: the code shows the layout the hook is
+//! currently tracking (`RU` = Russian, `EN` = English). Automatic switching is
+//! on for the filled white text and off for the hollow white outline.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;

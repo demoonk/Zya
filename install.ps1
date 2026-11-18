@@ -10,7 +10,7 @@ $ErrorActionPreference = 'Stop'
 
 $Repo = 'demoonk/Zya'
 $AppDir = Join-Path $env:APPDATA 'zя'
-$AppExe = Join-Path $AppDir 'zя.exe'
+$AppExe = Join-Path $AppDir 'z.exe'
 $ConfigFile = Join-Path $AppDir 'config.json'
 $LogFile = Join-Path $AppDir 'diario.log'
 $ReleaseUrl = "https://github.com/$Repo/releases/latest/download/z.exe"
@@ -121,9 +121,9 @@ if (-not $NoStart) {
         Start-Sleep -Seconds 3
 
         if (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue) {
-            Write-Host 'zя запущен: значок должен появиться в трее.'
+            Write-Host 'z.exe запущен: значок RU/EN должен появиться в трее.'
         } else {
-            Write-Host 'zя не запустился как resident app. Проверьте:'
+            Write-Host 'z.exe не запустился как resident app. Проверьте:'
             if (Test-Path -LiteralPath $stderrFile) {
                 Get-Content -LiteralPath $stderrFile -TotalCount 20
             }

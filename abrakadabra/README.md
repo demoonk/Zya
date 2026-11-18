@@ -177,8 +177,8 @@ zя help              справка
 `autostart: true` в `config.json` (или пункт меню в трее, или
 `zя autostart on`) регистрирует `HKCU\…\CurrentVersion\Run\zя`
 и запускает приложение скрыто (`run headless` — консольное окно прячется,
-остаётся только значок в трее). `zя install` копирует бинарник в
-`%APPDATA%\zя\zя.exe` и включает автозапуск.
+остаётся только RU/EN значок в трее). `zя install` копирует бинарник в
+`%APPDATA%\zя\z.exe` и включает автозапуск.
 
 ## Конфигурация
 
@@ -376,7 +376,7 @@ cargo test
 
 Имя пакета — `zya`: MinGW `ld` не может создать исполняемый файл с кириллицей
 в имени, поэтому cargo пишет `target\release\zya.exe`, а `tools\build.ps1`
-копирует его в `target\release\zя.exe`:
+копирует его в `target\release\z.exe`:
 
 ```
-powershell tools\build.ps1     # cargo build + переименование в zя.exe
+powershell tools\build.ps1     # cargo build + переименование в z.exe

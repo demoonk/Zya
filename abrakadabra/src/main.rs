@@ -19,42 +19,44 @@ use model::Model;
 
 fn usage() {
     println!(
-        "zя — автопереключатель раскладки (Rust, глобальный клавиатурный хук)\n\
+        "z.exe — автопереключатель раскладки (Rust, глобальный клавиатурный хук)\n\
+        \n\
+        Запуск требуется от администратора.\n\
         \n\
         команды:\n\
-          zя (без параметров)   запустить в рабочем режиме: хук и значок в трее\n\
-          zя run [<сек>] [headless]  то же явно; headless — без окна консоли\n\
-          zя traytest          проверить значок/меню без клавиатурного хука\n\
-          zя demo              проверка движка на наборе фраз (без хука)\n\
-          zя simtest           модель хука внутри процесса: клавиши -> текст\n\
-          zя simarticle        статья 3dnews через модель хука, без окон\n\
-          zя simall            все собранные статьи (3dnews/ixbt) через модель хука\n\
-          zя simkeys <клавиши> набрать физические клавиши в модель хука\n\
-           zя wintest           совместимость: хук на реальном EDIT-окне (19 тестов)\n\
-          zя article           реальный тест: многоязычная статья через хук\n\
-          zя peer \"<текст>\"    набрать текст в своём окне без хука (для теста\n\
+          z.exe (без параметров)   запустить в рабочем режиме: хук и значок в трее\n\
+          z.exe run [<сек>] [headless]  то же явно; headless — без окна консоли\n\
+          z.exe traytest          проверить значок/меню без клавиатурного хука\n\
+          z.exe demo              проверка движка на наборе фраз (без хука)\n\
+          z.exe simtest           модель хука внутри процесса: клавиши -> текст\n\
+          z.exe simarticle        статья 3dnews через модель хука, без окон\n\
+          z.exe simall            все собранные статьи (3dnews/ixbt) через модель хука\n\
+          z.exe simkeys <клавиши> набрать физические клавиши в модель хука\n\
+           z.exe wintest           совместимость: хук на реальном EDIT-окне (19 тестов)\n\
+          z.exe article           реальный тест: многоязычная статья через хук\n\
+          z.exe peer \"<текст>\"    набрать текст в своём окне без хука (для теста\n\
                                      с резидентным процессом, который держит хук)\n\
-          zя sanity            сравнение с эталоном на 4000+ словах\n\
-          zя check <текст>     показать, что движок сделал бы с этими словами\n\
-          zя score <текст>     внутренние оценки (ru/en) для каждого токена\n\
-          zя variants <текст>  варианты прочтения неоднозначных ключей\n\
-          zя selftest          прогнать встроенные проверочные случаи\n\
-          zя stats             статистику языковой модели\n\
-          zя probe             раскладки + проверка Alt+Shift на своём окне\n\
-          zя tgprobe           найти окна Telegram Desktop и снять снимок\n\
-           zя tgshot <path>     снимок окна Telegram в BMP\n\
-           zя tgcomposer <path> снимок полосы ввода Telegram\n\
-           zя tgtest            тесты хука прямо в поле ввода «Избранное»\n\
-           zя tgclear           очистить поле ввода Telegram\n\
-           zя autostart on|off  запуск при входе в Windows (или zя install)\n\
-          zя config            текущий конфигурационный JSON и его путь\n\
-          zя log               путь к журналу переключений\n\
-          zя techtest          восстановление всех терминов тех. словаря\n\
-           zя corpus            точность движка на тексте собранных статей\n\
-           zя help              эта справка\n\
+          z.exe sanity            сравнение с эталоном на 4000+ словах\n\
+          z.exe check <текст>     показать, что движок сделал бы с этими словами\n\
+          z.exe score <текст>     внутренние оценки (ru/en) для каждого токена\n\
+          z.exe variants <текст>  варианты прочтения неоднозначных ключей\n\
+          z.exe selftest          прогнать встроенные проверочные случаи\n\
+          z.exe stats             статистику языковой модели\n\
+          z.exe probe             раскладки + проверка Alt+Shift на своём окне\n\
+          z.exe tgprobe           найти окна Telegram Desktop и снять снимок\n\
+           z.exe tgshot <path>     снимок окна Telegram в BMP\n\
+           z.exe tgcomposer <path> снимок полосы ввода Telegram\n\
+           z.exe tgtest            тесты хука прямо в поле ввода «Избранное»\n\
+           z.exe tgclear           очистить поле ввода Telegram\n\
+           z.exe autostart on|off  запуск при входе в Windows (или install.ps1)\n\
+          z.exe config            текущий конфигурационный JSON и его путь\n\
+          z.exe log               путь к журналу переключений\n\
+          z.exe techtest          восстановление всех терминов тех. словаря\n\
+           z.exe corpus            точность движка на тексте собранных статей\n\
+           z.exe help              эта справка\n\
         \n\
-        значок в трее: буква показывает раскладку (Я = русская, Z = английская),\n\
-        белая клавиша — автоисправление работает, серая — выключено.\n\
+        значок в трее: RU или EN показывает раскладку,\n\
+        белый текст RU/EN — автоисправление работает, контурный — выключено.\n\
         левый клик — включить/выключить, правый — меню (автоисправление, автозапуск,\n\
         последние переключения, папка настроек, выход).\n\
         \n\
@@ -155,7 +157,7 @@ fn main() -> anyhow::Result<()> {
         let exe = std::env::current_exe()?;
         let dir = config::config_dir();
         std::fs::create_dir_all(&dir)?;
-        let dest = dir.join("zя.exe");
+        let dest = dir.join("z.exe");
         std::fs::copy(&exe, &dest)?;
         println!("zя: скопирован в {}", dest.display());
         if args.get(1).map(|s| s == "off").unwrap_or(false) {
@@ -165,7 +167,7 @@ fn main() -> anyhow::Result<()> {
         } else if set_autostart(&dest.display().to_string(), true) {
             write_autostart_flag(true);
             println!("zя: автозапуск включён (Run\\zя → {})", dest.display());
-            println!("запустить сейчас: zя run");
+            println!("запустить сейчас: z.exe run");
         } else {
             println!("zя: не удалось зарегистрировать автозапуск");
         }
@@ -334,7 +336,7 @@ fn main() -> anyhow::Result<()> {
                 win::hide_console();
             }
 
-            // Optional timed run: `zя run 10` exits cleanly after 10 seconds.
+            // Optional timed run: `z.exe run 10` exits cleanly after 10 seconds.
             // Used by automated tests so no process is ever left behind.
             if let Some(secs) = args.get(1).and_then(|s| s.parse::<u64>().ok()) {
                 std::thread::spawn(move || {

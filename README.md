@@ -27,6 +27,8 @@
 
 ## Установка
 
+Приложение требует запуск от администратора.
+
 На обычном компьютере достаточно одной команды:
 
 ```powershell
@@ -47,19 +49,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubus
 
 Установщик сам:
 
-- скачивает последнюю release-версию `z.exe` с GitHub (asset называется `z.exe`, локально он сохраняется как `zя.exe`);
+- скачивает последнюю release-версию `z.exe` с GitHub (asset называется `z.exe`, локально он сохраняется как `z.exe`);
 - проверяет, запущен ли Punto Switcher;
-- копирует программу в `%APPDATA%\zя\zя.exe`;
+- копирует программу в `%APPDATA%\zя\z.exe`;
 - создает `%APPDATA%\zя\config.json` и `%APPDATA%\zя\diario.log`;
-- запускает `zя.exe` в фоне без параметров.
+- запускает `z.exe` в фоне без параметров.
 
 Запуск приложения без параметров:
 
 ```powershell
-zя.exe
+z.exe
 ```
 
-или двойной клик по `zя.exe`. Это сразу рабочий режим: ставится клавиатурный хук и появляется значок в трее. В релизе `zя.exe` — self-contained exe: сам создаёт `%APPDATA%\zя\` и `config.json`, а embedded-бинарь внутри него запускается как `run headless`.
+или двойной клик по `z.exe`. Это сразу рабочий режим: ставится клавиатурный хук и появляется RU/EN значок в трее. В релизе `z.exe` — self-contained exe: сам создаёт `%APPDATA%\zя\` и `config.json`, а embedded-бинарь внутри него запускается как `run headless`.
 
 Если Punto Switcher запущен, установщик предупредит о возможном конфликте. Чтобы закрыть его автоматически:
 
@@ -102,9 +104,9 @@ zя.exe
 То же можно задать из командной строки:
 
 ```powershell
-zя.exe exclude add chrome.exe
-zя.exe exclude add-dir C:\Games
-zя.exe exclude list
+z.exe exclude add chrome.exe
+z.exe exclude add-dir C:\Games
+z.exe exclude list
 ```
 
 Перегенерировать иконки можно скриптом:

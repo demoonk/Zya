@@ -1,13 +1,14 @@
-// One-file ZЯ app: `zя.exe`.
+// One-file ZЯ app: `z.exe`.
 //
 // Running it with no parameters starts the working mode.
 // It creates/updates the installed app in the user Roaming folder:
-//   C:\Users\USER\AppData\Roaming\zя\zя.exe
+//   C:\Users\USER\AppData\Roaming\zя\z.exe
 // and creates settings files there if they are missing.
+// The executable asks Windows to launch it as administrator.
 
 use std::io::Write;
 
-const APP: &[u8] = include_bytes!("zya_app.bin");
+const APP: &[u8] = include_bytes!("z.bin");
 
 const DEFAULT_CONFIG: &str = r#"{
   "margin_unknown": 2.5,
@@ -32,7 +33,8 @@ const DEFAULT_CONFIG: &str = r#"{
 "#;
 
 const RUN_KEY: &str = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-const RUN_VALUE: &str = "zя";
+const RUN_VALUE: &str = "z.exe";
+const OLD_RUN_VALUE: &str = "zя";
 
 fn app_data_dir() -> std::path::PathBuf {
     let base = match std::env::var("APPDATA") {
@@ -59,6 +61,11 @@ fn run_reg(args: &[&str]) -> bool {
 }
 
 fn ensure_autostart(installed_path: &str) -> bool {
+    // Remove the old Cyrillic autostart entry if it still exists.
+    if run_reg(&["query", RUN_KEY, "/v", OLD_RUN_VALUE]) {
+        run_reg(&["delete", RUN_KEY, "/v", OLD_RUN_VALUE, "/f"]);
+    }
+
     if !run_reg(&["query", RUN_KEY, "/v", RUN_VALUE]) {
         run_reg(&[
             "add",
@@ -97,9 +104,9 @@ fn main() -> std::io::Result<()> {
     let dir = app_data_dir();
 
     std::fs::create_dir_all(&dir)?;
-    append_startup_log(&dir, "zя launcher: запуск");
+    append_startup_log(&dir, "z.exe launcher: запуск");
 
-    let installed_path = dir.join("zя.exe");
+    let installed_path = dir.join("z.exe");
     let current_path = std::env::current_exe().unwrap_or_else(|_| installed_path.clone());
 
     // If this exe was launched from another folder, overwrite the installed
@@ -107,8 +114,8 @@ fn main() -> std::io::Result<()> {
     // extracted and run from the cache.
     if current_path != installed_path {
         match std::fs::copy(&current_path, &installed_path) {
-            Ok(_) => append_startup_log(&dir, "zя launcher: обновил zя.exe в AppData"),
-            Err(e) => append_startup_log(&dir, &format!("zя launcher: не смог обновить zя.exe: {e}")),
+            Ok(_) => append_startup_log(&dir, "z.exe launcher: обновил z.exe в AppData"),
+            Err(e) => append_startup_log(&dir, &format!("z.exe launcher: не смог обновить z.exe: {e}")),
         }
     }
 
@@ -133,7 +140,7 @@ fn main() -> std::io::Result<()> {
     // Extract the embedded application binary from this single exe and run it.
     let cache_dir = dir.join(".cache");
     std::fs::create_dir_all(&cache_dir)?;
-    let app_path = cache_dir.join("zя_app.exe");
+    let app_path = cache_dir.join("z_app.exe");
     std::fs::write(&app_path, APP)?;
 
     let mut cmd = std::process::Command::new(&app_path);
