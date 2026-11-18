@@ -27,7 +27,7 @@
 
 ## Установка
 
-Если уже есть собранный бинарник:
+На обычном компьютере достаточно:
 
 ```powershell
 .\install.ps1
@@ -39,24 +39,51 @@
 install.bat
 ```
 
-Установщик копирует программу, создает конфигурацию, добавляет автозапуск и запускает `zя` в фоне.
+Установщик сам:
 
-## Сборка
+- скачивает последнюю release-версию `zya.exe` с GitHub, если в папке `abrakadabra/target` нет собранного файла;
+- проверяет, запущен ли Punto Switcher;
+- копирует программу в `%APPDATA%\Abrakadra\zya.exe`;
+- создает `%APPDATA%\zя\config.json`;
+- запускает `zя` в фоне.
 
-Для сборки нужен Rust и MSVC Build Tools:
-
-```powershell
-.\build.ps1
-```
-
-или:
+Если Punto Switcher запущен, установщик предупредит о возможном конфликте. Чтобы закрыть его автоматически:
 
 ```powershell
-cd abrakadabra
-cargo build --release
+.\install.ps1 -StopPunto
 ```
 
-Если `cargo` сообщает, что нет `link.exe`, установите Visual Studio Build Tools с workload **C++ build tools**.
+Если нужно собрать программу прямо на компьютере:
+
+```powershell
+.\install.ps1 -Build
+```
+
+Этот режим попытается скачать Rust через `rustup-init.exe`, а если `link.exe` отсутствует — скачать и установить Visual Studio Build Tools с workload **C++ build tools**.
+
+Полезные ключи:
+
+```powershell
+.\install.ps1 -DryRun
+.\install.ps1 -NoDownload
+.\install.ps1 -InstallDependencies -Build
+```
+
+## Иконки в трее
+
+Иконки сделаны крупными и прозрачными:
+
+- белый текст на прозрачном фоне;
+- буква `Я` для русской раскладки;
+- буква `A` для английской раскладки;
+- сплошная буква — автопереключение включено;
+- контурная буква — автопереключение выключено.
+
+Перегенерировать иконки можно скриптом:
+
+```powershell
+python abrakadabra/tools/build_tray_icons.py
+```
 
 ## Удаление
 

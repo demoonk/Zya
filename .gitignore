@@ -27,5 +27,11 @@ query
 # Local backup of an old nested repository
 .git-abrakadabra-backup/
 
-# Temporary local helper used for pushing
+# Temporary local helpers and build/release artifacts
 gh_cred_helper.*
+rustc_wrapper.*
+rustc_msvc_to_gnu_wrapper.rs
+push_to_github.py
+release/
+*.bak
+*.dib.bak
