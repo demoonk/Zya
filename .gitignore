@@ -33,5 +33,6 @@ rustc_wrapper.*
 rustc_msvc_to_gnu_wrapper.rs
 push_to_github.py
 release/
+temp_icons/
 *.bak
 *.dib.bak
