@@ -5,6 +5,8 @@
 //   C:\Users\USER\AppData\Roaming\zя\zя.exe
 // and creates settings files there if they are missing.
 
+use std::io::Write;
+
 const APP: &[u8] = include_bytes!("../release/zya_app.exe");
 
 const DEFAULT_CONFIG: &str = r#"{
@@ -74,19 +76,40 @@ fn ensure_autostart(installed_path: &str) -> bool {
     }
 }
 
+fn append_startup_log(dir: &std::path::Path, msg: &str) {
+    let path = dir.join("startup.log");
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let line = format!("[launcher {}s] {}\n", stamp, msg);
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = app_data_dir();
 
     std::fs::create_dir_all(&dir)?;
+    append_startup_log(&dir, "zя launcher: запуск");
 
     let installed_path = dir.join("zя.exe");
     let current_path = std::env::current_exe().unwrap_or_else(|_| installed_path.clone());
 
     // If this exe was launched from another folder, overwrite the installed
-    // one-file app with this copy.
+    // one-file app with this copy. If the copy fails, the embedded app is still
+    // extracted and run from the cache.
     if current_path != installed_path {
-        std::fs::copy(&current_path, &installed_path)?;
+        match std::fs::copy(&current_path, &installed_path) {
+            Ok(_) => append_startup_log(&dir, "zя launcher: обновил zя.exe в AppData"),
+            Err(e) => append_startup_log(&dir, &format!("zя launcher: не смог обновить zя.exe: {e}")),
+        }
     }
 
     let config_path = dir.join("config.json");
