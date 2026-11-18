@@ -1,12 +1,9 @@
-// One-file launcher for ZЯ.
+// One-file ZЯ app: `zя.exe`.
 //
-// `zya.exe` contains the actual Rust application embedded inside it.
-// Running it with no parameters starts the app in working mode and creates
-// the user config folder:
-//   C:\Users\USER\AppData\Roaming\zя\
-//
-// The app binary is extracted there as `zya_app.exe`, and config.json is
-// created if it does not exist.
+// Running it with no parameters starts the working mode.
+// It creates/updates the installed app in the user Roaming folder:
+//   C:\Users\USER\AppData\Roaming\zя\zя.exe
+// and creates settings files there if they are missing.
 
 const APP: &[u8] = include_bytes!("../release/zya_app.exe");
 
@@ -32,6 +29,9 @@ const DEFAULT_CONFIG: &str = r#"{
 }
 "#;
 
+const RUN_KEY: &str = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+const RUN_VALUE: &str = "zя";
+
 fn app_data_dir() -> std::path::PathBuf {
     let base = match std::env::var("APPDATA") {
         Ok(v) => std::path::PathBuf::from(v),
@@ -40,21 +40,78 @@ fn app_data_dir() -> std::path::PathBuf {
     base.join("zя")
 }
 
+fn config_wants_autostart(config: &str) -> bool {
+    config.contains("\"autostart\": true") || config.contains("\"autostart\":true")
+}
+
+fn run_reg(args: &[&str]) -> bool {
+    match std::process::Command::new("reg")
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        Ok(status) => status.success(),
+        Err(_) => false,
+    }
+}
+
+fn ensure_autostart(installed_path: &str) -> bool {
+    if !run_reg(&["query", RUN_KEY, "/v", RUN_VALUE]) {
+        run_reg(&[
+            "add",
+            RUN_KEY,
+            "/v",
+            RUN_VALUE,
+            "/t",
+            "REG_SZ",
+            "/d",
+            &format!("\"{}\" run headless", installed_path),
+            "/f",
+        ])
+    } else {
+        true
+    }
+}
+
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = app_data_dir();
 
     std::fs::create_dir_all(&dir)?;
 
-    let app_path = dir.join("zya_app.exe");
-    if std::fs::metadata(&app_path).map(|m| m.len() != APP.len() as u64).unwrap_or(true) {
-        std::fs::write(&app_path, APP)?;
+    let installed_path = dir.join("zя.exe");
+    let current_path = std::env::current_exe().unwrap_or_else(|_| installed_path.clone());
+
+    // If this exe was launched from another folder, overwrite the installed
+    // one-file app with this copy.
+    if current_path != installed_path {
+        std::fs::copy(&current_path, &installed_path)?;
     }
 
     let config_path = dir.join("config.json");
-    if !config_path.exists() {
-        std::fs::write(&config_path, DEFAULT_CONFIG)?;
+    let config_text = match std::fs::read_to_string(&config_path) {
+        Ok(text) => text,
+        Err(_) => {
+            std::fs::write(&config_path, DEFAULT_CONFIG)?;
+            DEFAULT_CONFIG.to_string()
+        }
+    };
+
+    let diary_path = dir.join("diario.log");
+    if !diary_path.exists() {
+        std::fs::write(&diary_path, "")?;
     }
+
+    if std::env::var("ZYA_NO_AUTOSTART").is_err() && config_wants_autostart(&config_text) {
+        ensure_autostart(&installed_path.display().to_string());
+    }
+
+    // Extract the embedded application binary from this single exe and run it.
+    let cache_dir = dir.join(".cache");
+    std::fs::create_dir_all(&cache_dir)?;
+    let app_path = cache_dir.join("zя_app.exe");
+    std::fs::write(&app_path, APP)?;
 
     let mut cmd = std::process::Command::new(&app_path);
     if args.is_empty() {
