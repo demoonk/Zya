@@ -262,9 +262,8 @@ fn main() -> anyhow::Result<()> {
     match cmd {
         "run" => {
             let headless = args.iter().any(|a| a == "headless") || args.is_empty();
-            if headless {
-                win::hide_console();
-            }
+            // Do not hide the console until the hook/tray have been checked.
+            // If tray creation fails, the error remains visible to the user.
             // The `autostart` field in config.json is the single source of truth:
             // the registry entry is created or removed to match it.
             if cfg.autostart != autostart::enabled() {
@@ -331,6 +330,10 @@ fn main() -> anyhow::Result<()> {
             if !headless {
                 println!("Ctrl+C — выйти; правый клик по значку — меню.");
             }
+            if headless && hook_ok && hwnd.is_some() {
+                win::hide_console();
+            }
+
             // Optional timed run: `zя run 10` exits cleanly after 10 seconds.
             // Used by automated tests so no process is ever left behind.
             if let Some(secs) = args.get(1).and_then(|s| s.parse::<u64>().ok()) {
