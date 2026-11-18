@@ -180,6 +180,20 @@ fn traced() -> bool {
     *TRACE.get_or_init(|| std::env::var("ZYA_VERBOSE").is_ok())
 }
 
+/// Split a trailing word-end key (`? & / ^`) from the token: the key is a
+/// boundary, not a part of the word. Returns `(head, tail)`.
+fn split_word_end(token: &str) -> Option<(&str, char)> {
+    let tail = token.chars().last()?;
+    if !crate::layout::is_boundary_trigger(tail) {
+        return None;
+    }
+    let head = token.strip_suffix(tail)?;
+    if head.is_empty() {
+        return None;
+    }
+    Some((head, tail))
+}
+
 impl Engine {
     pub fn new(model: Model, cfg: Config) -> Engine {
         Engine { model, cfg }
@@ -829,6 +843,16 @@ impl Engine {
     /// `prev` is the token that was typed immediately before this one: the
     /// single-letter rules need that context, the others do not.
     pub fn decide_with(&self, token: &str, prev: &str) -> Option<Decision> {
+        // The word-end key `? & / ^` is not a part of the word: judge the token
+        // without it and attach it back to the decision. This way "pfghtn&" is
+        // decided exactly like "pfghtn".
+        if let Some((head, tail)) = split_word_end(token) {
+            let mut d = self.decide_with(head, prev)?;
+            d.converted.push(tail);
+            d.original = token.to_string();
+            return Some(d);
+        }
+
         // A technical term typed correctly is never touched, and a mistyped
         // model number ("ввк4" = DDR4) is caught before the identifier rule,
         // which would otherwise throw away anything containing a digit.
@@ -1411,7 +1435,6 @@ mod tests {
         for (typed, want) in [
             ("ЭприветЭ", "\"привет\""),
             ("ЭтекстЭ", "\"текст\""),
-            ("ЭруддщЭ", "\"hello\""),
             ("приветЭ", "привет\""),
             ("ЭЭЭ", "\"\"\""),
         ] {
@@ -1421,6 +1444,11 @@ mod tests {
             assert_eq!(d.converted, want, "{typed}");
             assert!(!d.flip, "{typed}: quote fix must not switch layout");
         }
+
+        // A quoted word typed in the wrong layout is translated too; the quotes
+        // are restored, the layout does have to change for that.
+        let d = e.decide("ЭруддщЭ").expect("ЭруддщЭ should become \"hello\"");
+        assert_eq!(d.converted, "\"hello\"");
 
         // A real Russian word starting with Э must not be eaten by an opening quote.
         for word in ["Эта", "Эра", "Эхо"] {

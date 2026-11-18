@@ -298,6 +298,9 @@ fn main() -> anyhow::Result<()> {
             };
 
             if hook_ok {
+                win::start_focus_guard();
+                startup_log("zя: контроль фокуса окон запущен");
+
                 println!(
                     "zя: хук установлен ({}), автопереключение {}.",
                     if hwnd.is_some() {

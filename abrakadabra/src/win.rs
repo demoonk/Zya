@@ -921,6 +921,87 @@ fn undo_last(a: &mut App, deferred: bool) {
     }
 }
 
+fn boundary_to_write(c: char, flip: bool) -> char {
+    // If the corrected token ends on a layout-ambiguous punctuation key, write
+    // the punctuation produced by the corrected layout: Russian `б`/`ю` become
+    // English `,`/`.` when the word flips from RU to EN.
+    if flip && crate::layout::is_ambiguous(c) {
+        crate::layout::map_key(c).unwrap_or(c)
+    } else {
+        c
+    }
+}
+
+unsafe fn decide_word_on_boundary(a: &mut App, word: &str, c: char) -> bool {
+    if verbose() {
+        println!(
+            "boundary: word={word:?} langid={} auto={}",
+            a.lang, a.auto
+        );
+    }
+
+    if !a.auto {
+        a.last = None;
+        return false;
+    }
+
+    let fg_id = GetForegroundWindow().0 as usize;
+    if a.secret_fg != fg_id {
+        a.secret_fg = fg_id;
+        a.secret = is_secret_field();
+    }
+    if context_blocked(a) {
+        a.last = None;
+        return false;
+    }
+    if verbose() {
+        println!(
+            "   context: {} / {}",
+            foreground_process(),
+            foreground_text()
+        );
+    }
+
+    let prev = a.prev_word.clone();
+    match a.engine.decide_with(word, &prev) {
+        Some(d) => {
+            a.switches += 1;
+            if verbose() {
+                println!("decision: {word} -> {}", d.converted);
+            }
+            crate::diary::log(&d, a.switches);
+
+            let swallow = !c.is_control();
+            let boundary = boundary_to_write(c, d.flip);
+            let n = rewrite(
+                d.original.chars().count(),
+                &d.converted,
+                if swallow { Some(boundary) } else { None },
+                d.flip,
+            );
+            if verbose() {
+                println!("   rewrite injected {n} events");
+            }
+
+            if d.flip {
+                a.lang = other_layout(a.lang);
+            }
+            sync_tray(a);
+            a.word.clear();
+            a.prev_word = d.converted.clone();
+            a.closed = Some((d.converted.clone(), if swallow { Some(c) } else { None }));
+            a.last = Some(d);
+            a.last_boundary = if swallow { Some(c) } else { None };
+            return swallow;
+        }
+        None => {
+            a.last = None;
+            a.prev_word = word.to_string();
+            return false;
+        }
+    }
+}
+
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     EVENTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // WH_KEYBOARD_LL delivers both key down (code 1) and key up (code 0 is
@@ -1141,6 +1222,28 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         c = c.to_uppercase().next().unwrap_or(c);
     }
 
+    // Requested word-end triggers: `? & / ^` behave like a space and flush the
+    // pending buffer immediately.
+    let latin_boundary =
+        crate::layout::is_latin_boundary_letter(c) && a.word.chars().any(crate::layout::is_latin);
+    if crate::layout::is_boundary_trigger(c) || latin_boundary {
+        a.identifier = false;
+        if !a.run.is_empty() {
+            a.closed = Some((a.run.clone(), Some(c)));
+        }
+        a.run.clear();
+
+        if !a.word.is_empty() {
+            let word = std::mem::take(&mut a.word);
+            if decide_word_on_boundary(&mut a, &word, c) {
+                return LRESULT(1);
+            }
+        } else {
+            a.last_boundary = None;
+        }
+        return CallNextHookEx(None, code, wparam, lparam);
+    }
+
     // Track the physical token for the manual Break hotkey: everything up to the
     // next separator counts as one word, and `-` is *not* a separator.
     if c.is_whitespace() {
@@ -1148,6 +1251,15 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
             a.closed = Some((a.run.clone(), Some(c)));
         }
         a.run.clear();
+        a.identifier = false;
+
+        if !a.word.is_empty() {
+            let word = std::mem::take(&mut a.word);
+            if decide_word_on_boundary(&mut a, &word, c) {
+                return LRESULT(1);
+            }
+        }
+        return CallNextHookEx(None, code, wparam, lparam);
     } else if c == '-' {
         a.run.push('-');
     } else if c.is_alphanumeric()
@@ -1229,83 +1341,16 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         }
         return CallNextHookEx(None, code, wparam, lparam);
     }
-    if c.is_whitespace() {
-        a.identifier = false;
-    }
-
-    // Any other key closes the word: decide whether it was typed in the wrong
-    // layout. The boundary key itself is passed through normally.
+    // Any remaining non-letter key is a word boundary, not text. It flushes the
+    // buffer exactly like a space.
+    a.identifier = false;
     if a.word.is_empty() {
         return CallNextHookEx(None, code, wparam, lparam);
     }
-    let word = std::mem::take(&mut a.word);
-    if verbose() {
-        println!("boundary: word={word:?} langid={lid} auto={}", a.auto);
-    }
-    if !a.auto {
-        a.last = None;
-        return CallNextHookEx(None, code, wparam, lparam);
-    }
 
-    let fg_id = unsafe { GetForegroundWindow() }.0 as usize;
-    if a.secret_fg != fg_id {
-        a.secret_fg = fg_id;
-        a.secret = unsafe { is_secret_field() };
-    }
-    if unsafe { context_blocked(&a) } {
-        a.last = None;
-        return CallNextHookEx(None, code, wparam, lparam);
-    }
-    if verbose() {
-        println!(
-            "   context: {} / {}",
-            unsafe { foreground_process() },
-            unsafe { foreground_text() }
-        );
-    }
-    let prev = a.prev_word.clone();
-    match a.engine.decide_with(&word, &prev) {
-        Some(d) => {
-            a.switches += 1;
-            if verbose() {
-                println!("decision: {word} -> {}", d.converted);
-            }
-            crate::diary::log(&d, a.switches);
-            // The boundary character is re-typed inside the batch, because after
-            // the layout flip the physical key would produce a different glyph.
-            let swallow = !c.is_control();
-            let n = rewrite(
-                d.original.chars().count(),
-                &d.converted,
-                if swallow { Some(c) } else { None },
-                d.flip,
-            );
-            if verbose() {
-                println!("   rewrite injected {n} events");
-            }
-            // Only a layout swap changes the keyboard state; a punctuation fix
-            // injects Alt+Shift only when the word really came from the other
-            // layout.
-            if d.flip {
-                a.lang = other_layout(a.lang);
-            }
-            sync_tray(&a);
-            a.word = String::new();
-            a.prev_word = d.converted.clone();
-            // The rewritten token is finished: the injected boundary never comes
-            // back through the hook, so the run must be closed explicitly.
-            a.run.clear();
-            a.closed = Some((d.converted.clone(), if swallow { Some(c) } else { None }));
-            a.last = Some(d);
-            a.last_boundary = if swallow { Some(c) } else { None };
-            if swallow {
-                return LRESULT(1);
-            }
-        }
-        None => {
-            a.last = None;
-            a.prev_word = word;
-        }
+    let word = std::mem::take(&mut a.word);
+    if decide_word_on_boundary(&mut a, &word, c) {
+        return LRESULT(1);
     }
     CallNextHookEx(None, code, wparam, lparam)
 }
@@ -1324,6 +1369,35 @@ pub fn remove_hook() {
             let _ = UnhookWindowsHookEx(HHOOK(h as *mut std::ffi::c_void));
         }
     }
+}
+
+pub fn start_focus_guard() {
+    std::thread::spawn(|| {
+        let mut last_fg = unsafe { GetForegroundWindow() }.0 as usize;
+
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            let fg = unsafe { GetForegroundWindow() }.0 as usize;
+            if fg == last_fg {
+                continue;
+            }
+
+            last_fg = fg;
+            let mut a = app().lock().unwrap();
+            a.last_fg = fg;
+            a.secret_fg = fg;
+            a.secret = unsafe { is_secret_field() };
+
+            // A new foreground application starts a new text context. Anything
+            // left from the previous window must not leak into the next word.
+            a.word.clear();
+            a.run.clear();
+            a.closed = None;
+            a.identifier = false;
+            a.last_boundary = None;
+            a.last = None;
+        }
+    });
 }
 
 pub fn run_message_loop() {

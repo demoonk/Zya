@@ -122,6 +122,18 @@ pub fn is_ambiguous(c: char) -> bool {
     match_key_letter(c)
 }
 
+/// Characters that close the pending word buffer, just like a space.
+/// These are the punctuation/word-end keys the user asked for: `? & / ^`.
+/// `б`/`ю` only close the buffer when they cannot be a letter of the word.
+pub fn is_boundary_trigger(c: char) -> bool {
+    matches!(c, '?' | '&' | '/' | '^')
+}
+
+/// `б` and `ю` live on the `,` and `.` keys: after a Latin word they close it.
+pub fn is_latin_boundary_letter(c: char) -> bool {
+    matches!(c, 'б' | 'ю' | 'Б' | 'Ю')
+}
+
 fn match_key_letter(c: char) -> bool {
     map_key(c).is_some_and(|m| m.is_alphabetic())
 }
@@ -156,5 +168,19 @@ mod tests {
         assert_eq!(script_of("hello"), Some(Script::Latin));
         assert_eq!(script_of("привет123"), Some(Script::Cyrillic));
         assert_eq!(script_of("abcдеф"), None);
+    }
+
+    #[test]
+    fn asked_boundary_chars_close_the_buffer() {
+        for c in ['?', '&', '/', '^'] {
+            assert!(is_boundary_trigger(c), "{c} must close the buffer");
+        }
+        for c in ['б', 'ю', 'Б', 'Ю'] {
+            assert!(is_latin_boundary_letter(c), "{c} closes a Latin word");
+            assert!(!is_boundary_trigger(c), "{c} still may be a letter");
+        }
+        assert!(!is_boundary_trigger('a'));
+        assert!(!is_boundary_trigger('к'));
+        assert!(!is_boundary_trigger('-'));
     }
 }

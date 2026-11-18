@@ -8,7 +8,9 @@
 //! физических ключей: `keys_of("привет")` = "ghbdtn".
 
 use crate::engine::Engine;
-use crate::layout::{is_ambiguous, is_cyrillic, map_key};
+use crate::layout::{
+    is_ambiguous, is_boundary_trigger, is_cyrillic, is_latin, is_latin_boundary_letter, map_key,
+};
 
 #[derive(Debug, Clone)]
 pub struct Sim {
@@ -88,6 +90,21 @@ impl Sim {
     pub fn press(&mut self, engine: &Engine, key: char) {
         let c = self.glyph(key);
 
+        // Запрошенные границы слова: `? & / ^` закрывают буфер, как пробел.
+        // `б`/`ю` закрывают его только после латинского слова: внутри русского
+        // слова это обычные буквы.
+        let latin_boundary = is_latin_boundary_letter(c) && self.word.chars().any(is_latin);
+        if is_boundary_trigger(c) || latin_boundary {
+            self.identifier = false;
+            if self.word.is_empty() {
+                self.out.push(c);
+                return;
+            }
+            let word = std::mem::take(&mut self.word);
+            self.close_word(engine, &word, c);
+            return;
+        }
+
         // Буквы и «двухзначные» ключи (б ю ж э х ъ) продолжают слово.
         if c.is_alphabetic() || is_ambiguous(c) {
             self.word.push(c);
@@ -121,16 +138,21 @@ impl Sim {
             return;
         }
         let word = std::mem::take(&mut self.word);
+        self.close_word(engine, &word, c);
+    }
+
+    /// Закрыть текущее слово на символе-границе `c` и решить автозамену.
+    fn close_word(&mut self, engine: &Engine, word: &str, c: char) {
         if !self.auto {
             self.out.push(c);
-            self.prev = word;
+            self.prev = word.to_string();
             return;
         }
         let prev = self.prev.clone();
-        match engine.decide_with(&word, &prev) {
+        match engine.decide_with(word, &prev) {
             Some(d) => {
                 self.switches += 1;
-                self.log.push((word.clone(), d.converted.clone()));
+                self.log.push((word.to_string(), d.converted.clone()));
                 // Хук стирает исходный токен, печатает зеркальную форму и
                 // перепечатывает клавишу границы: после смены раскладки она дала
                 // бы другой символ.
@@ -139,7 +161,13 @@ impl Sim {
                 }
                 self.out.push_str(&d.converted);
                 if !c.is_control() {
-                    self.out.push(c);
+                    // Как и хук: на границе раскладки пишется знак целевой
+                    // раскладки (б/ю -> ,/. при переходе RU -> EN).
+                    if d.flip && is_ambiguous(c) {
+                        self.out.push(map_key(c).unwrap_or(c));
+                    } else {
+                        self.out.push(c);
+                    }
                 }
                 if d.flip {
                     self.russian = !self.russian;
@@ -148,7 +176,7 @@ impl Sim {
             }
             None => {
                 self.out.push(c);
-                self.prev = word;
+                self.prev = word.to_string();
             }
         }
     }
@@ -161,6 +189,15 @@ impl Sim {
 
     pub fn identifier_seen(&self) -> bool {
         self.identifier
+    }
+
+    /// Сброс при смене активного окна, как в `win::start_focus_guard`.
+    #[allow(dead_code)]
+    pub fn reset_buffer(&mut self) {
+        self.word.clear();
+        self.prev.clear();
+        self.identifier = false;
+        self.out.clear();
     }
 }
 
@@ -817,6 +854,48 @@ mod tests {
         let (got, sw) = type_keys(&e, &keys_of("клуб "), false);
         assert_eq!(got, "клуб ", "клуб is a word, the letter stays");
         assert_eq!(sw, 0);
+    }
+
+    /// Запрошенные символы-границы `? & / б ю ^` закрывают слово, как пробел.
+    #[test]
+    fn asked_boundaries_trigger_the_fix() {
+        let e = engine();
+        for (typed, want) in [
+            ("pfghtn&", "запрет&"),
+            ("pfghtn?", "запрет?"),
+            ("pfghtn/", "запрет/"),
+            ("pfghtn^", "запрет^"),
+        ] {
+            let (got, sw) = type_keys(&e, typed, true);
+            assert_eq!(got, want, "{typed}");
+            assert_eq!(sw, 1, "{typed} must be fixed");
+        }
+
+        // `б` и `ю` — это знаки `,` и `.` при русской раскладке: сразу после
+        // латинского слова они закрывают буфер и дают место запятой/точке.
+        let (got, sw) = type_keys(&e, "rfrjq&nj", true);
+        assert_eq!(got, "какой&то", "& closes the word like a space");
+        assert_eq!(sw, 1, "никто keeps the buffer open");
+
+        let mut sim = Sim::new(false);
+        sim.press_text(&e, &keys_of("контекст"));
+        assert_eq!(sim.out, "контекст");
+        sim.press(&e, 'б');
+        assert_eq!(sim.out, "контекст,", "б is the comma key");
+        assert!(sim.layout_is_russian(), "a punctuation fix keeps the layout");
+    }
+
+    /// Смена активного окна сбрасывает буфер: недописанное слово не склеивается
+    /// с первым словом нового окна.
+    #[test]
+    fn focus_change_drops_the_pending_buffer() {
+        let mut sim = Sim::new(true);
+        sim.word.push_str("pfgh");
+        assert!(!sim.word.is_empty());
+        sim.reset_buffer();
+        assert!(sim.word.is_empty(), "focus change must clear the buffer");
+        assert!(sim.prev.is_empty());
+        assert!(sim.out.is_empty());
     }
 
     #[test]
