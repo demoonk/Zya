@@ -134,6 +134,16 @@ fn migrate_legacy(dir: &Path) {
     }
 }
 
+pub fn save(cfg: &Config) -> std::io::Result<()> {
+    let dir = config_dir();
+    std::fs::create_dir_all(&dir)?;
+    let file = FileConfig::from(cfg);
+    std::fs::write(
+        dir.join("config.json"),
+        serde_json::to_string_pretty(&file).expect("config serialization"),
+    )
+}
+
 pub fn load() -> Config {
     let dir = config_dir();
     std::fs::create_dir_all(&dir).ok();
