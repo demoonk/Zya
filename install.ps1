@@ -1,3 +1,6 @@
+# One-line install:
+# powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/demoonk/Zya/main/install.ps1 | iex"
+
 param(
     [switch]$NoStart,
     [switch]$StopPunto

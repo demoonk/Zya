@@ -30,7 +30,13 @@
 На обычном компьютере достаточно одной команды:
 
 ```powershell
-powershell -NoProfile -Command "irm https://raw.githubusercontent.com/demoonk/Zya/main/install.ps1 | iex"
+irm https://raw.githubusercontent.com/demoonk/Zya/main/install.ps1 | iex
+```
+
+Если PowerShell ругается на policy:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/demoonk/Zya/main/install.ps1 | iex"
 ```
 
 Если репозиторий уже скачан, можно так:
