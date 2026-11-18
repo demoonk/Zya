@@ -404,7 +404,7 @@ impl Engine {
 
         let inner_cyrillic: String = inner
             .chars()
-            .filter(|c| crate::layout::is_cyrillic(c))
+            .filter(|c| crate::layout::is_cyrillic(*c))
             .collect();
 
         if inner_cyrillic.chars().count() < 2 || inner.chars().any(|c| c == 'Э') {
