@@ -7,6 +7,7 @@
 // The executable asks Windows to launch it as administrator.
 
 use std::io::Write;
+use windows::Win32::UI::Shell::IsUserAnAdmin;
 
 const APP: &[u8] = include_bytes!("z.bin");
 
@@ -101,10 +102,21 @@ fn append_startup_log(dir: &std::path::Path, msg: &str) {
 
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    if !unsafe { IsUserAnAdmin() }.as_bool() {
+        eprintln!("z.exe must be launched as administrator. Run it with administrator rights.");
+        std::process::exit(1);
+    }
+
     let dir = app_data_dir();
 
-    std::fs::create_dir_all(&dir)?;
-    append_startup_log(&dir, "z.exe launcher: запуск");
+    match std::fs::create_dir_all(&dir) {
+        Ok(_) => append_startup_log(&dir, "z.exe launcher: запуск"),
+        Err(e) => {
+            eprintln!("z.exe launcher error: cannot create {} : {}", dir.display(), e);
+            return Err(e);
+        }
+    }
 
     let installed_path = dir.join("z.exe");
     let current_path = std::env::current_exe().unwrap_or_else(|_| installed_path.clone());
@@ -122,15 +134,31 @@ fn main() -> std::io::Result<()> {
     let config_path = dir.join("config.json");
     let config_text = match std::fs::read_to_string(&config_path) {
         Ok(text) => text,
-        Err(_) => {
-            std::fs::write(&config_path, DEFAULT_CONFIG)?;
-            DEFAULT_CONFIG.to_string()
+        Err(read_err) => {
+            match std::fs::write(&config_path, DEFAULT_CONFIG) {
+                Ok(_) => DEFAULT_CONFIG.to_string(),
+                Err(e) => {
+                    eprintln!(
+                        "z.exe launcher error: cannot write {} after read error {} : {}",
+                        config_path.display(),
+                        read_err,
+                        e
+                    );
+                    return Err(e);
+                }
+            }
         }
     };
 
     let diary_path = dir.join("diario.log");
     if !diary_path.exists() {
-        std::fs::write(&diary_path, "")?;
+        match std::fs::write(&diary_path, "") {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("z.exe launcher error: cannot write {} : {}", diary_path.display(), e);
+                return Err(e);
+            }
+        }
     }
 
     if std::env::var("ZYA_NO_AUTOSTART").is_err() && config_wants_autostart(&config_text) {
@@ -139,9 +167,15 @@ fn main() -> std::io::Result<()> {
 
     // Extract the embedded application binary from this single exe and run it.
     let cache_dir = dir.join(".cache");
-    std::fs::create_dir_all(&cache_dir)?;
+    if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+        eprintln!("z.exe launcher error: cannot create {} : {}", cache_dir.display(), e);
+        return Err(e);
+    }
     let app_path = cache_dir.join("z_app.exe");
-    std::fs::write(&app_path, APP)?;
+    if let Err(e) = std::fs::write(&app_path, APP) {
+        eprintln!("z.exe launcher error: cannot write {} : {}", app_path.display(), e);
+        return Err(e);
+    }
 
     let mut cmd = std::process::Command::new(&app_path);
     if args.is_empty() {
