@@ -1,0 +1,537 @@
+{
+  "sha": "38502f4c9c7f3f3abff0853087f1c9803b383896",
+  "url": "https://api.github.com/repos/Krot66/LangBarXX/git/trees/38502f4c9c7f3f3abff0853087f1c9803b383896",
+  "tree": [
+    {
+      "path": "LangBarXX.ahk",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "05b8cc852765936088fc6c4107b03d4c47a6b69b",
+      "size": 163408,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/05b8cc852765936088fc6c4107b03d4c47a6b69b"
+    },
+    {
+      "path": "LangBarXX.ico",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "987f9a576facac940cd25597d4a7b062223d3077",
+      "size": 30069,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/987f9a576facac940cd25597d4a7b062223d3077"
+    },
+    {
+      "path": "LangBarXX.iss",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "def09ec1177b26defaaa09a01cbfa6efa7f37ac4",
+      "size": 7083,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/def09ec1177b26defaaa09a01cbfa6efa7f37ac4"
+    },
+    {
+      "path": "Lib",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "742e5a18bb31510151b4f102ec487c4fef1842ec",
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/trees/742e5a18bb31510151b4f102ec487c4fef1842ec"
+    },
+    {
+      "path": "Lib/Acc.ahk",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "19fc83a2a71d83f1f590641f335c5176742a0459",
+      "size": 7656,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/19fc83a2a71d83f1f590641f335c5176742a0459"
+    },
+    {
+      "path": "Lib/Base64PNG_to_HICON.ahk",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "943729204cb949e08c1baff2d5c241ec6c9e560a",
+      "size": 559,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/943729204cb949e08c1baff2d5c241ec6c9e560a"
+    },
+    {
+      "path": "Lib/ChooseColor.ahk",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "497ca7b6f7bfad04135b20d7774750eb5a249674",
+      "size": 1789,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/497ca7b6f7bfad04135b20d7774750eb5a249674"
+    },
+    {
+      "path": "Lib/CopyAddress.ahk",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "36d959ff6b2daac4d91189b8224bc055d2b16fce",
+      "size": 4872,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/36d959ff6b2daac4d91189b8224bc055d2b16fce"
+    },
+    {
+      "path": "Lib/Gdip_All.ahk",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1581b07c55af3d188bf5efcf46fc6a454f3a68a6",
+      "size": 373528,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/1581b07c55af3d188bf5efcf46fc6a454f3a68a6"
+    },
+    {
+      "path": "Lib/GetCaretLocation.ahk",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ba93ee459a8c0b41f4a808811f7042940ba3e77e",
+      "size": 1925,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/ba93ee459a8c0b41f4a808811f7042940ba3e77e"
+    },
+    {
+      "path": "Lib/InputLayout.ahk",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c3157fcc26ff5d877e20f0ad00ea935e03df8a96",
+      "size": 1001,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/c3157fcc26ff5d877e20f0ad00ea935e03df8a96"
+    },
+    {
+      "path": "Lib/LV.ahk",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c2558aec1cabf1b01530eb77eaa53f3a6b5ea994",
+      "size": 3537,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/c2558aec1cabf1b01530eb77eaa53f3a6b5ea994"
+    },
+    {
+      "path": "Lib/LangCode.ahk",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0c600881f963e927e0e09315b787bb3a8c16ca13",
+      "size": 6010,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/0c600881f963e927e0e09315b787bb3a8c16ca13"
+    },
+    {
+      "path": "Lib/MsgBoxEx.ahk",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "109928689910cdf644ff9d387364b51b8b13852f",
+      "size": 3004,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/109928689910cdf644ff9d387364b51b8b13852f"
+    },
+    {
+      "path": "Lib/RemoveLetterAccents.ahk",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e2ac9aa6f0841bd5ab1ceb97bef23a43b3c76646",
+      "size": 1084,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/e2ac9aa6f0841bd5ab1ceb97bef23a43b3c76646"
+    },
+    {
+      "path": "Lib/SendText.ahk",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "bfca6ad18d385c058f1b0a3cd67dde88924b7123",
+      "size": 866,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/bfca6ad18d385c058f1b0a3cd67dde88924b7123"
+    },
+    {
+      "path": "Lib/SetInputLayout.ahk",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "fb6a08bab1575e3c36191c6a09f28bf4514250e8",
+      "size": 2316,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/fb6a08bab1575e3c36191c6a09f28bf4514250e8"
+    },
+    {
+      "path": "Lib/Spell.ahk",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "49e1b13f479e6a702242405422eb5866dbcc9bb6",
+      "size": 27157,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/49e1b13f479e6a702242405422eb5866dbcc9bb6"
+    },
+    {
+      "path": "Lib/StrUnmark.ahk",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "42fc6277dd163cd1fb1fac5972100ae8cfbabc1e",
+      "size": 761,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/42fc6277dd163cd1fb1fac5972100ae8cfbabc1e"
+    },
+    {
+      "path": "Lib/StringToAnotherLayout.ahk",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e13a70d3a54a59b78cd9d6eea7cf323285d3c7ed",
+      "size": 1361,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/e13a70d3a54a59b78cd9d6eea7cf323285d3c7ed"
+    },
+    {
+      "path": "Lib/Translit.ahk",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e668cf6c788b1cec41139fc881ac38cd5e1420a4",
+      "size": 2383,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/e668cf6c788b1cec41139fc881ac38cd5e1420a4"
+    },
+    {
+      "path": "Lib/ZipFile.ahk",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "eb7c4aa7751ea5ca775a357f99f0fbcc09040a77",
+      "size": 7381,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/eb7c4aa7751ea5ca775a357f99f0fbcc09040a77"
+    },
+    {
+      "path": "Lib/_icons.ahk",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b6a512eb5eb33e700004d6d7a5911b8f762ddf7f",
+      "size": 16089,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/b6a512eb5eb33e700004d6d7a5911b8f762ddf7f"
+    },
+    {
+      "path": "ReadMe.assets",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "b3c43b79610c6698a07fd1b279c76a6a862c6281",
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/trees/b3c43b79610c6698a07fd1b279c76a6a862c6281"
+    },
+    {
+      "path": "ReadMe.assets/ReadMe1.gif",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a5a8bccf62cc21c408df6bc630715ee99a1bdf05",
+      "size": 100277,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/a5a8bccf62cc21c408df6bc630715ee99a1bdf05"
+    },
+    {
+      "path": "ReadMe.assets/ReadMe1.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "96d8d3c4cfb1684272a097021e7d4376d65d6608",
+      "size": 10204,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/96d8d3c4cfb1684272a097021e7d4376d65d6608"
+    },
+    {
+      "path": "ReadMe.assets/ReadMe10.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "13d47241275ab69b1cf3eb5d96df1261da071341",
+      "size": 17415,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/13d47241275ab69b1cf3eb5d96df1261da071341"
+    },
+    {
+      "path": "ReadMe.assets/ReadMe11.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1f60c382a3a68a9a75edda444932d32d35b73a39",
+      "size": 6279,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/1f60c382a3a68a9a75edda444932d32d35b73a39"
+    },
+    {
+      "path": "ReadMe.assets/ReadMe2.gif",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "eb2c1ed2d569002b128efcbedd27844efcf5ce8c",
+      "size": 79241,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/eb2c1ed2d569002b128efcbedd27844efcf5ce8c"
+    },
+    {
+      "path": "ReadMe.assets/ReadMe2.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "85e9b04bd5933a10d21a2c3ab460437a4a996a76",
+      "size": 8452,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/85e9b04bd5933a10d21a2c3ab460437a4a996a76"
+    },
+    {
+      "path": "ReadMe.assets/ReadMe3.gif",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8dc8bd85692a96ea52d96a872ad1bb5d72d57179",
+      "size": 45253,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/8dc8bd85692a96ea52d96a872ad1bb5d72d57179"
+    },
+    {
+      "path": "ReadMe.assets/ReadMe3.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e488c700c4be70064496218a91a66972af018f06",
+      "size": 52009,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/e488c700c4be70064496218a91a66972af018f06"
+    },
+    {
+      "path": "ReadMe.assets/ReadMe4.gif",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e92a861c77e80f6a2e8198b7cb6032d64f0e759c",
+      "size": 53536,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/e92a861c77e80f6a2e8198b7cb6032d64f0e759c"
+    },
+    {
+      "path": "ReadMe.assets/ReadMe4.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7b24535b8d8e134cf57151e0395aeba561670ea7",
+      "size": 10094,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/7b24535b8d8e134cf57151e0395aeba561670ea7"
+    },
+    {
+      "path": "ReadMe.assets/ReadMe5.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0711fde28a5e57c1510cc2cea39f7706dd911aff",
+      "size": 15292,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/0711fde28a5e57c1510cc2cea39f7706dd911aff"
+    },
+    {
+      "path": "ReadMe.assets/ReadMe6.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "da32b351e32c84154bc9016d5b3f0667ce749fa0",
+      "size": 36145,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/da32b351e32c84154bc9016d5b3f0667ce749fa0"
+    },
+    {
+      "path": "ReadMe.assets/ReadMe7.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ca18d5358393a311c0a1e113ece7d6c47b1c07ea",
+      "size": 37255,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/ca18d5358393a311c0a1e113ece7d6c47b1c07ea"
+    },
+    {
+      "path": "ReadMe.assets/ReadMe8.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "03831b15c9ee067480be7fc5dc62e418f7f957ef",
+      "size": 33254,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/03831b15c9ee067480be7fc5dc62e418f7f957ef"
+    },
+    {
+      "path": "ReadMe.assets/ReadMe9.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f2d05e4bdec735160f7ad1c671a28c3471eb7882",
+      "size": 42437,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/f2d05e4bdec735160f7ad1c671a28c3471eb7882"
+    },
+    {
+      "path": "ReadMe.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "e145f6125580e4fb18b642e0c6da8d564848d4d1",
+      "size": 143539,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/e145f6125580e4fb18b642e0c6da8d564848d4d1"
+    },
+    {
+      "path": "_Installer",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "e5fbe98370387a01857c3ba13b13738206a44975",
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/trees/e5fbe98370387a01857c3ba13b13738206a44975"
+    },
+    {
+      "path": "_Installer/Install.ico",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "da40e79417fa27f866254763327d2ab951ddec2a",
+      "size": 63961,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/da40e79417fa27f866254763327d2ab951ddec2a"
+    },
+    {
+      "path": "_Installer/LGPL-3.0.txt",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "65c5ca88a67c30becee01c5a8816d964b03862f9",
+      "size": 7651,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/65c5ca88a67c30becee01c5a8816d964b03862f9"
+    },
+    {
+      "path": "_Installer/WizModernImage-IS.bmp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "cf844e093a4cc7aceee0be44353817397825e35b",
+      "size": 52574,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/cf844e093a4cc7aceee0be44353817397825e35b"
+    },
+    {
+      "path": "_Installer/WizModernSmallImage-IS.bmp",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1e8e49792789cc6c89ff18194cf31e4c6765b9a5",
+      "size": 4158,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/1e8e49792789cc6c89ff18194cf31e4c6765b9a5"
+    },
+    {
+      "path": "drag.ico",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8ba2014d7348bd7ce28991c1d783a290559ec97a",
+      "size": 6742,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/8ba2014d7348bd7ce28991c1d783a290559ec97a"
+    },
+    {
+      "path": "flags",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "0b33af5d33cc06374cd05760675a6a9e81f2eb22",
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/trees/0b33af5d33cc06374cd05760675a6a9e81f2eb22"
+    },
+    {
+      "path": "flags/be-BY.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1a2d1a38073985d684d150b2b672f51dc6129b14",
+      "size": 643,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/1a2d1a38073985d684d150b2b672f51dc6129b14"
+    },
+    {
+      "path": "flags/de-DE.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8d5ec1bfcd3d87550359f7476827abf21a0c5dc5",
+      "size": 176,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/8d5ec1bfcd3d87550359f7476827abf21a0c5dc5"
+    },
+    {
+      "path": "flags/en-GB.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c6896282712fcc392b798bc26e780f35decd66ca",
+      "size": 680,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/c6896282712fcc392b798bc26e780f35decd66ca"
+    },
+    {
+      "path": "flags/en-US.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "50fde4fe8d3653d5528ef070af45806b2504787f",
+      "size": 2629,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/50fde4fe8d3653d5528ef070af45806b2504787f"
+    },
+    {
+      "path": "flags/fr-FR.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "56e941ad99fd4414734fb84a7625814a3ffd3a1d",
+      "size": 234,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/56e941ad99fd4414734fb84a7625814a3ffd3a1d"
+    },
+    {
+      "path": "flags/pl-PL.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ecf67d59942687c8af798c190fade09ae48c4090",
+      "size": 163,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/ecf67d59942687c8af798c190fade09ae48c4090"
+    },
+    {
+      "path": "flags/ru-RU.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "57304f1d17591c31d6e18a825e38eb752d78096d",
+      "size": 177,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/57304f1d17591c31d6e18a825e38eb752d78096d"
+    },
+    {
+      "path": "flags/uk-UA.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "bcd3dc905ff80abc14953070ddac98b41efaf83f",
+      "size": 185,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/bcd3dc905ff80abc14953070ddac98b41efaf83f"
+    },
+    {
+      "path": "flags/флажки.zip",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "661246a37e16ff2e065595fd04d9c20a90c87e78",
+      "size": 270390,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/661246a37e16ff2e065595fd04d9c20a90c87e78"
+    },
+    {
+      "path": "masks",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "82d7a77189fccc38f9cfa6c87e5637b05677ffa2",
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/trees/82d7a77189fccc38f9cfa6c87e5637b05677ffa2"
+    },
+    {
+      "path": "masks/Autocorrect.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a2bfeac5056b8b0c26abf2c96dcf6c819ec98ddf",
+      "size": 1269,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/a2bfeac5056b8b0c26abf2c96dcf6c819ec98ddf"
+    },
+    {
+      "path": "masks/CapsLock.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "40b854bf538067aa049796c588f3a285b6113b8e",
+      "size": 182,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/40b854bf538067aa049796c588f3a285b6113b8e"
+    },
+    {
+      "path": "masks/NumLock.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "79f15dd23a54a8212f1bbea43a6f00f5d71fcd34",
+      "size": 477,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/79f15dd23a54a8212f1bbea43a6f00f5d71fcd34"
+    },
+    {
+      "path": "masks/NumScroll.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "58834430b8ad19db12e6f3df5bba44263aa02bdd",
+      "size": 605,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/58834430b8ad19db12e6f3df5bba44263aa02bdd"
+    },
+    {
+      "path": "masks/ScrollLock.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b117364744fcf4e8b8a8e0c1f327bb2db5f5d091",
+      "size": 242,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/b117364744fcf4e8b8a8e0c1f327bb2db5f5d091"
+    },
+    {
+      "path": "masks/SingleLang.png",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f835ce2dbfdf7a9d10a633775a41b3cba04fed8e",
+      "size": 1254,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/f835ce2dbfdf7a9d10a633775a41b3cba04fed8e"
+    },
+    {
+      "path": "sounds",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "fc4ef065db01bfa78bd13f9e1b41cb00e8ebccf3",
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/trees/fc4ef065db01bfa78bd13f9e1b41cb00e8ebccf3"
+    },
+    {
+      "path": "sounds/autocorrect.wav",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "15701f43d15c6e0f55bded443d1b0248aefce8c1",
+      "size": 32452,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/15701f43d15c6e0f55bded443d1b0248aefce8c1"
+    },
+    {
+      "path": "sounds/autoreplace.wav",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5f93f51a4b02cbf8bbe014d4655badee05eda474",
+      "size": 20620,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/5f93f51a4b02cbf8bbe014d4655badee05eda474"
+    },
+    {
+      "path": "sounds/undo.wav",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8195bd83a379b870238601eb8971f6771425d1fd",
+      "size": 98013,
+      "url": "https://api.github.com/repos/Krot66/LangBarXX/git/blobs/8195bd83a379b870238601eb8971f6771425d1fd"
+    }
+  ],
+  "truncated": false
+}

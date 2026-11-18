@@ -1,0 +1,31 @@
+# Rust build artifacts
+target/
+
+# Compiled binaries and debug files
+*.exe
+*.dll
+*.pdb
+
+# Temporary and test output
+*_err.txt
+*_out.txt
+*_run*.txt
+verbose_*.txt
+tg_*.bmp
+tg_*.png
+
+# Python artifacts
+__pycache__/
+*.pyc
+
+# Scratch files and object/test leftovers
+0
+query
+*.rcgu.o
+*.dl*.rcgu.o
+
+# Local backup of an old nested repository
+.git-abrakadabra-backup/
+
+# Temporary local helper used for pushing
+gh_cred_helper.*

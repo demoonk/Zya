@@ -1,0 +1,902 @@
+# KeySwitch
+
+This repository also includes [LogCourier](crates/logcourier/README.md), a separate
+Windows/Linux application that sends selected log files to a private Telegram
+group. Its UI accepts your bot token and group ID. Uploading is opt-in and disabled
+by default; it is not built into the KeySwitch input engine.
+
+[Русский](README.md) · [**English**](README.en.md)
+
+[![GitHub release](https://img.shields.io/github/v/release/olegius88/keyswitch)](https://github.com/olegius88/keyswitch/releases/latest)
+[![License: GPL v3+](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
+
+KeySwitch is a desktop application for Windows 10/11 x64, 32-bit Windows 10 and Windows 11 on Arm,
+Ubuntu/Xubuntu (X11 and Wayland: GNOME, KDE Plasma 6, sway) and macOS 13 or newer that automatically
+corrects words typed using the wrong
+keyboard layout. It is a free, open-source alternative to Punto Switcher,
+Caramba Switcher and EveryLang, and unlike them it also runs on Linux.
+Recognition runs entirely locally, typed text is never sent anywhere, and the
+layouts come from the active EN/RU system pair.
+
+[Website](https://olegius88.github.io/keyswitch/) ·
+[Documentation map](docs/README.md) ·
+[Input troubleshooting](docs/troubleshooting.md) ·
+[Verification, builds and releases](docs/verification.md) (guides in Russian)
+
+The latest published stable release is
+[0.73.0](https://github.com/olegius88/keyswitch/releases/tag/v0.73.0).
+The changes are listed in [CHANGELOG.md](CHANGELOG.md) and the known defects
+of the release in [RELEASE_NOTES.md](RELEASE_NOTES.md).
+
+## Features
+
+- global input observation through `WH_KEYBOARD_LL` on Windows, XRecord in
+  regular Linux X11 applications, and a kernel-level keyboard grab in a Wayland
+  session (see [Wayland](#wayland));
+- automatic English and Russian word detection after a typing pause (0.7
+  seconds by default, configurable), as well as after Space or
+  unambiguous punctuation; idle correction can be disabled independently in
+  settings. Keys that can be letters in the other layout remain buffered until
+  continuation, Space or idle. A separate learned boundary model distinguishes
+  word endings from literal punctuation and abstains when uncertain.
+  [Boundary model evidence](model/boundary_v2/README.md);
+- early layout switching before the end of a word (`ghbd` → `прив`): a
+  separately trained, context-aware prefix model decides in `assist`, within
+  its evaluated 4–12-character range, and waits when uncertain. Minimum length
+  is configurable (4 by default); early switching is on by default and can be
+  turned off in the settings. `off`,
+  `shadow`, or disabling context uses the legacy lexical prefix algorithm.
+  [Training evidence and limitations](model/prefix_v1/README.md);
+- precision-first hybrid detection using hard guards, frequency lexicons,
+  Hunspell morphology, character n-grams, recent context and a lightweight
+  first-party linear model;
+- conservative guards for URLs, paths, code, abbreviations, ambiguous words
+  and common technical terms;
+- switching rules: a double press of `Pause/Break` offers a rule for the last
+  word, `Enter` opens the rule window already filled in from the situation (the
+  word matches the letters, starts with them or contains them; case-sensitive or
+  not; convert or keep), and the rule exists only once OK is pressed. The rules
+  are listed on the Maintenance page;
+- system layout switching and correction of the already typed word through
+  Win32 `SendInput` or XTEST;
+- respect for manual layout selection: the first completed word after the user
+  switches languages is left unchanged; this behavior can be disabled;
+- case preservation: `Ghbdtn` becomes `Привет`;
+- manual conversion with `Pause` of the unfinished word, of symbols typed
+  after a word boundary (for example `"` meant as `@`), or of the last word;
+  once anything else was typed after it, `Pause` only switches the layout. When
+  KeySwitch itself converted the word at a pause in typing less than 1.5 seconds
+  before the press and nothing was typed since, the first `Pause` changes
+  nothing: it asked for that very conversion. A second press converts the word
+  back. A Mac keyboard has no `Pause`, so on macOS the manual conversion and the
+  double press that offers a rule default to `Control+Option+K`;
+- layout switching with a lone tap of a modifier, as in Punto Switcher and
+  Caramba: the left or right `Shift` or `Ctrl`, pressed and released with no
+  other key, switches the layout (see
+  [Which keys switch the layout](#which-keys-switch-the-layout));
+- manual conversion with a lone tap of a modifier: another of these keys can do
+  what `Pause` does (see the same section);
+- undo of the last correction for 10 seconds with `Ctrl+Alt+Z`;
+- global pause with `Ctrl+Alt+P`;
+- application exclusions selected from the active window, the installed
+  application catalog, a Windows `.exe` picker or entered manually, plus word
+  exclusions;
+- local history containing only completed corrections;
+- notifications, sound, light/dark themes and startup after OS login;
+- a live `EN/RU` or country-flag layout indicator; either a left or right click
+  opens a menu that selects the language opposite to the current one, alongside
+  settings, pause, sound, notifications, history, exclusions, about and quit;
+- a native full settings window with overview, test field, automatic
+  correction, hotkeys, exclusions, history and backend diagnostics;
+- scrollable settings pages; Windows marks changed settings with a color and
+  offers individual reset buttons. Both platforms offer a full settings reset
+  that preserves correction history and switching rules;
+- single-instance protection: launching KeySwitch again activates the existing
+  application window;
+- automatic stable GitHub Release checks after startup and every six hours;
+  Windows downloads the verified Setup EXE, installs it silently and restarts
+  KeySwitch, while Ubuntu reports the release and opens its page for manual
+  DEB installation.
+
+KeySwitch does not record the complete keystroke stream. The current word and
+up to 512 recent context characters are held in RAM. When history is enabled,
+it stores correction pairs such as `ghbdtn → привет` with their timestamp,
+application and score. Linear inference is fully local and model weights are
+not updated from ordinary typing.
+
+Technical logging also writes evaluated words and decision reasons, including
+unchanged words. It may contain private text; enable it temporarily for diagnosis.
+
+The contextual assistant is a separate local four-action classifier, not an
+LLM: keep, convert, wait or suggest. It uses recent text and application
+identity; for example, it can wait for the next word in `e 'njuj` → `у этого`.
+`assist` is enabled by default; `shadow` leaves automatic decisions to the
+baseline detector. Optional reading of existing field text through OS
+accessibility is off by default. Quality is not established for real chats.
+The expanded [context-v2 corpus](model/context_v2/README.md) exposed limitations
+of both its baseline and candidate; the candidate failed its quality conditions
+and **is not deployed**. Since 0.37.0 the application ships a
+[context-v3](model/context_v3/README.md) pair: a model for finished words and a prefix model;
+the [release receipt](model/context_v3/release-receipt.json) records the pair installed now.
+See [settings, training, privacy and limits](docs/context-assistant.md).
+
+On Windows, Enter/Tab is intercepted before delivery: the word is corrected
+first, then the action is sent exactly once. For example, `ghbdtn` + Enter
+submits `привет` when settings and safety guards permit correction.
+They are intercepted only when a key was pressed since the last Enter/Tab: an
+Enter after an Enter and a Tab after a Tab reach the application at once and
+repeat while held. In an excluded program Enter/Tab are not intercepted.
+While a rule offer is shown, Enter only opens the rule window and does not reach
+the application.
+Shift/Ctrl/Alt shortcuts are not intercepted. If the word cannot be corrected and
+the text is untouched (the field gave no answer or did not show the word), the
+key goes on with the text as it stands. A correction failure or a focus
+change cancels submission and is reported in diagnostics. A Wayland session
+works the same way. On X11 these actions have already reached the application,
+so use Space, idle correction or Pause before submitting or changing fields.
+See the [EN/RU input maturity matrix](docs/input-maturity.md) for regression
+scenarios and platform limitations.
+
+## Which keys switch the layout
+
+The system switches the layout with its own shortcut: on Windows `Win+Space` and
+`Ctrl+Shift` (or `Alt+Shift` where that is chosen in the input language
+settings), on Linux the desktop's shortcut (`Super+Space` in GNOME; in XFCE and
+KDE whatever the keyboard layout settings say), on macOS `Control+Space` or the
+`Fn`/🌐 key. KeySwitch adds three ways to them:
+
+- `Pause` with nothing to convert only switches the layout (`Control+Option+K` on
+  macOS), and so does the key of the setting «Преобразовать последнее слово
+  одной клавишей» (below);
+- the «Переключить на …» (switch to …) item of the tray menu;
+- the setting «Переключать раскладку одной клавишей» (switch the layout with a
+  single key) on the «Горячие клавиши» (hotkeys) page: the left or right `Shift`
+  or `Ctrl`, pressed and released with no other key, switches the layout EN ⇄
+  RU. It is off by default. `Shift` with a letter, a click or a turn of the
+  wheel with the key held, `Ctrl+C` and a hold longer than half a second switch
+  nothing, and the key itself reaches the program as usual. The first word after
+  such a switch stays as typed, as after any manual switch. Leave it off where
+  the system already switches the layout on this key. It does not work together
+  with Sticky Keys. With «Ввод от других программ» (input from other programs)
+  on, a tap that comes from a remote computer switches the layout too. On
+  Wayland KeySwitch notices a touchpad scroll by the touch: a scroll whose
+  fingers were down before the key does not end the tap.
+
+The setting «Преобразовать последнее слово одной клавишей» (convert the last
+word with a single key) on the same page offers the same keys, and a tap counts
+there as it does here, but such a tap does what `Pause` does (`Control+Option+K`
+on macOS): it converts the last word, or switches the layout when there is
+nothing to convert, and a second tap right after the first offers a switching
+rule for the word. It works while autocorrection is paused and in excluded
+applications, as `Pause` does. It is off by default. One key cannot both switch
+the layout and convert: the settings window does not let one setting take a key
+the other one has, and where a settings file edited by hand names one key in
+both, the key only switches the layout.
+
+## Install on Windows
+
+Download `KeySwitch-Setup-0.73.0-x64.exe` from the
+[published 0.73.0 release](https://github.com/olegius88/keyswitch/releases/tag/v0.73.0) and run
+it. The per-user installation goes to `%LOCALAPPDATA%\Programs\KeySwitch` and
+does not require administrator privileges. The release also includes the
+portable `KeySwitch-0.73.0-windows-x64.zip` archive.
+
+Windows on Arm has a build of its own: `KeySwitch-Setup-0.73.0-arm64.exe` and
+`KeySwitch-0.73.0-windows-arm64.zip`. The x64 installer installs there too, but the
+program then runs under emulation. 32-bit Windows 10, which cannot run the x64 build,
+has an x86 one: `KeySwitch-Setup-0.73.0-x86.exe` and `KeySwitch-0.73.0-windows-x86.zip`.
+Each build updates itself with the installer of its own architecture.
+
+After launch, KeySwitch appears in the notification area. Left- or right-click
+the `EN/RU` or flag icon to open its menu. Its Switch to action always offers
+the language opposite to the current one. Startup, start minimized, indicator,
+sound and notifications can be changed on the Appearance and System page.
+
+Windows 11 hides the icons of new programs behind the Show hidden icons arrow;
+only the user can bring `EN/RU` onto the taskbar: Settings → Personalization →
+Taskbar → Other system tray icons, the KeySwitch switch. If the laptop keyboard
+has no `Pause` key, assign the manual conversion to another key or chord (for
+example `Ctrl+Alt+K`) on the «Горячие клавиши» (hotkeys) page, item «Преобразовать
+последнее слово» (convert the last word).
+
+Automatic checks and installation are enabled by default on the Updates page.
+Thirty seconds after startup and every six hours thereafter, KeySwitch reads
+the latest stable release from
+[`olegius88/keyswitch`](https://github.com/olegius88/keyswitch/releases), then
+validates the exact Setup EXE name, URL, size and GitHub API SHA-256 digest. If
+a newer version exists, the per-user installer runs silently; KeySwitch exits
+and starts minimized again after installation. Automatic checking and
+installation can be disabled independently.
+
+To run from source on Windows, with Rust and its MSVC target:
+
+```powershell
+$env:KEYSWITCH_MODEL_PATH = "$PWD\model\intent_v1\sources"
+cargo run --release -p ks-win
+```
+
+For the complete detection model when running from source, point
+`KEYSWITCH_MODEL_PATH` to `model/intent_v1/sources`; it contains the exact
+frozen `en_US.lm` and `ru_RU.lm` used for training. KeySwitch's own
+`layout_intent_v1.ksm` is already part of its resources. The Setup EXE and
+portable ZIP bundle the lexicons, KSLM and contextual model automatically.
+
+## Install on macOS
+
+macOS 13 or newer is required. The
+[published 0.73.0 release](https://github.com/olegius88/keyswitch/releases/tag/v0.73.0)
+carries two archives, and exactly one of them is needed:
+
+- `KeySwitch-0.73.0-macos-arm64.zip` — Mac with Apple silicon (M1 and later);
+- `KeySwitch-0.73.0-macos-x86_64.zip` — Mac with an Intel processor.
+
+Unpack the archive and move `KeySwitch.app` to Applications. The application is
+signed with a Developer ID certificate and notarized by Apple, so it opens with an
+ordinary double click.
+
+On its first start KeySwitch asks for the Accessibility permission: without it the
+program cannot see the keyboard. It shows the system prompt itself, opens the
+settings pane where the switch lives and carries on without a restart once the
+permission is given. KeySwitch appears in the menu bar; the settings window is the
+same as on Windows. The manual conversion of a word and the double press that
+offers a rule are on `Control+Option+K`: a Mac has no `Pause` key. A setting that
+still holds `Pause` takes this shortcut once; another key you chose stays.
+
+KeySwitch updates itself on a Mac as on Windows: the Updates page has the automatic
+check and the automatic install, both on by default. 30 seconds after the start and
+then every six hours the program reads the latest stable release, downloads the
+archive for its processor and checks its size and SHA-256 against the GitHub API.
+The new version is unpacked beside the application and installed only if it is
+signed by the same developer as the installed one, names the expected version and
+starts. It then takes the place of the old one, the Accessibility permission stays,
+and KeySwitch starts again minimized (with the settings window, if it was open). If
+the new version does not start, the old one comes back, and the program does not
+install that version by itself again; the Install now («Установить сейчас») button
+installs it again.
+
+If you cannot write to the folder of the application (another user installed
+KeySwitch, or the account has no administrator rights), macOS asks for an
+administrator's password. An automatic check then only tells of the new version,
+and the install starts with the Install now button. An application macOS runs from
+a temporary copy (as it does when it is opened right where the archive was unpacked,
+or from a disk image) does not update itself: move it to Applications.
+
+## Quick start on Ubuntu
+
+The currently verified environment is Ubuntu 26.04.1 LTS with XFCE, X11 and
+the `us,ru` system layouts.
+
+The program is built from source. It needs Rust, installed with
+[rustup](https://rustup.rs), a C compiler and the GTK 4 and libadwaita
+development files:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+sudo apt install build-essential libgtk-4-dev libadwaita-1-dev
+git clone https://github.com/olegius88/keyswitch.git
+cd keyswitch
+./run.sh
+```
+
+`run.sh` builds the program and starts it, passing its own arguments on; the
+program takes its resources and word lists from the source tree. When
+something the build needs is missing, the script names the package to install.
+What the program needs while it runs is listed under
+[System dependencies](#system-dependencies).
+
+The application window includes a test field. Select EN, type `test `, then
+`ghbdtn` and stop: the default idle check runs after about 0.7 seconds to
+convert it to `привет` and select RU. Space requests an immediate check.
+The initial `test ` completes the default one-word protection after a manual
+language choice; that protection is intentional, not a lost event.
+For the reverse direction, select RU, type `тест `, then `руддщ` (the physical
+keys for `hello`). `Pause` requests manual conversion of the current word;
+technical logging explains why automatic correction was skipped.
+
+To tell KeySwitch what to do with a particular word, press `Pause/Break` twice
+right after it. The word becomes the opposite of what the program did: a wrong
+correction is undone, a missed one is made. A prompt above the input position
+asks "Добавить правило переключения?" (add a switching rule?). `Enter` opens the
+rule window filled in from the situation: "keep the word" for an undone
+correction, "convert the word" for a missed one. The letters, the condition (the
+word contains them, starts with them or matches them), case sensitivity and the
+action can be changed there. The rule exists only after OK or `Enter` in that
+window; `Esc`, Cancel, typing on or letting the prompt time out store nothing. A
+single `Pause` and an undo with `Ctrl+Alt+Z` only fix the text and teach
+nothing. Rules outrank the model's decision; they are listed, added, edited and
+removed on the Maintenance page and switched off by the "Правила переключения"
+setting.
+
+Keys other programs send on Windows - remote control (TeamViewer, AnyDesk),
+macros, on-screen keyboards - are not treated as typing by default: KeySwitch
+neither corrects words made of them, nor answers their `Pause`, nor holds their
+Enter back. When the controlling computer runs KeySwitch too, that copy corrects
+the words. The "Ввод от других программ" (input from other programs) setting
+restores the previous behaviour.
+
+Probe the system backend without opening the application window:
+
+```bash
+./run.sh --diagnose
+```
+
+## Install the Debian package
+
+Download `keyswitch_0.73.0_amd64.deb` from the
+[published 0.73.0 release](https://github.com/olegius88/keyswitch/releases/tag/v0.73.0), then
+install it with:
+
+```bash
+sudo apt install ./keyswitch_0.73.0_amd64.deb
+```
+
+The package installs the required system dependencies and adds KeySwitch to the
+application menu. The application in the package is one Rust executable and needs no interpreter. The `amd64` package cannot be installed on another architecture.
+
+### Updates through APT
+
+Along with the application, the package installs the APT source
+`/etc/apt/sources.list.d/keyswitch.sources` and the public key
+`/etc/apt/keyrings/keyswitch-archive-keyring.asc` that signs the repository
+at <https://olegius88.github.io/keyswitch/>. From then on KeySwitch is updated
+with the rest of the system: Software Updater and `sudo apt upgrade` offer a
+new version like any other package. APT refreshes its package lists on the
+`apt-daily.timer` schedule; run `sudo apt update` to see a new version at once.
+
+The key is trusted for this repository alone: the source names it in
+`Signed-By`, and it never joins the set of keys APT trusts everywhere. To stop
+taking updates from here, add `Enabled: no` to the source file or delete it —
+dpkg keeps that decision through later package upgrades and removes the file on
+`sudo apt purge keyswitch`.
+
+To install KeySwitch straight from the repository, without downloading a `.deb`:
+
+```bash
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://olegius88.github.io/keyswitch/keyswitch-archive-keyring.asc \
+  | sudo tee /etc/apt/keyrings/keyswitch-archive-keyring.asc >/dev/null
+sudo tee /etc/apt/sources.list.d/keyswitch.sources <<'EOF'
+Types: deb
+URIs: https://olegius88.github.io/keyswitch/
+Suites: stable
+Components: main
+Architectures: amd64
+Signed-By: /etc/apt/keyrings/keyswitch-archive-keyring.asc
+EOF
+sudo apt update && sudo apt install keyswitch
+```
+
+Release checking inside the application stays a notification: KeySwitch shows
+the version it found and an Open release button, and APT performs the
+installation — the application never installs the system package in the
+background.
+
+## Install from source
+
+You need Rust, a C compiler and the GTK 4 and libadwaita development files:
+
+```bash
+sudo apt install build-essential libgtk-4-dev libadwaita-1-dev
+./packaging/build-rust-deb.sh dist
+sudo apt install ./dist/keyswitch_*.deb
+```
+
+To build without installing, use `./run.sh` (see [Quick start on Ubuntu](#quick-start-on-ubuntu)): it runs `cargo run --release -p ks-linux` and tells the program where its resources and word lists are: `KEYSWITCH_RESOURCES=resources`, `KEYSWITCH_MODEL_PATH=model/intent_v1/sources`.
+
+## Wayland
+
+In a Wayland session no program sees the keys of other windows, so KeySwitch
+takes the keyboard at the kernel level. A separate process (`keyswitch
+--wayland-input-helper`) grabs the keyboards (`EVIOCGRAB`) and passes every key
+on through its own virtual keyboard on `/dev/uinput`, which also types the
+corrections. The desktop reports the layout and the active window:
+
+- **GNOME Shell 45–51** (verified on GNOME 50): the `keyswitch@io.github.olegius88.KeySwitch`
+  extension from the package. KeySwitch enables it; GNOME discovers a new
+  extension only at login, so log out and back in once after the first
+  installation. The extension also reports a password field, in an
+  application window and in the Shell's own dialogs (password prompts), so
+  that KeySwitch leaves it alone;
+- **KDE Plasma 6**: the `org.kde.keyboard` layout service and a KWin script;
+- **sway**: its IPC (`SWAYSOCK`).
+
+Other compositors (Hyprland, labwc, Wayfire and others) give a program no way
+to switch the layout, and KeySwitch does not start there; the diagnostics say so.
+
+KeySwitch does not take access to the keyboards itself, and the package does
+not grant it: an administrator enables it once.
+
+```bash
+sudo keyswitch --enable-wayland-input
+```
+
+The command installs the udev rule `/etc/udev/rules.d/60-keyswitch.rules` and
+applies it at once: the user of the active session gets read and write access
+to `/dev/uinput`, keyboards, mice and touchpads (the `uaccess` tag), with no
+`input` group and no root service. Mice are there so that a click resets the
+word being typed. **This means any program of that user can read every key,
+passwords included, and type keys of its own** — as any program can on X11 and
+Windows. To take it back: `sudo keyswitch --disable-wayland-input` removes the
+rule and the access to the devices at once. When KeySwitch runs from source
+(`./run.sh`), the command is the same with the path of the built program:
+`sudo target/release/keyswitch --enable-wayland-input`. KeySwitch lets the
+keyboards go on the lock screen and when another session takes the seat
+(`LockedHint` and `Active` of systemd-logind).
+
+If the main KeySwitch process hangs, the input process waits at most 0.25
+seconds for its answer, then lets keys through on its own and reports them so
+that none is lost; an input process that crashes is started again, and the
+kernel releases its grab.
+
+## System dependencies
+
+The Debian package installs them itself. A run from source (`./run.sh`) needs
+the same components; a standard current Ubuntu installation may already have
+them:
+
+```bash
+sudo apt install at-spi2-core curl libgtk-4-1 libadwaita-1-0 libxkbcommon0 \
+  libhunspell-1.7-0 hunspell-en-us hunspell-ru
+```
+
+Check the active XKB layout pair with:
+
+```bash
+setxkbmap -query
+```
+
+This release uses the first two XKB groups. Default settings require
+`layout: us,ru`: `detection.language_models` maps `["en_US", "ru_RU"]` by group
+index. Reversing the layouts is not equivalent without matching language-model
+configuration; the standard setup is `us,ru`.
+
+## Settings and data
+
+On Windows:
+
+- settings: `%APPDATA%\KeySwitch\config.json`;
+- history, switching rules, custom dictionaries and log:
+  `%LOCALAPPDATA%\KeySwitch`;
+- autostart: the per-user
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` registry key.
+
+On Linux:
+
+- settings: `~/.config/keyswitch/config.json`;
+- correction history: `~/.local/share/keyswitch/history.jsonl`;
+- switching rules: `~/.local/share/keyswitch/learning.json`;
+- optional per-user Hunspell dictionaries:
+  `~/.local/share/keyswitch/dictionaries/<locale>.aff/.dic`;
+- startup and optional technical-diagnostics log:
+  `~/.local/share/keyswitch/keyswitch.log`;
+- autostart entry: `~/.config/autostart/io.github.olegius88.KeySwitch.desktop`.
+
+These are default paths. Linux honors `XDG_CONFIG_HOME`/`XDG_DATA_HOME`;
+`KEYSWITCH_CONFIG_DIR` and `KEYSWITCH_DATA_DIR` override settings and data
+directories on both platforms, for example for isolated testing.
+
+`KeePassXC`, `1Password` and `Bitwarden` are excluded by default. A global
+observer alone does not know field semantics. Optional accessibility reading
+excludes recognized protected fields but is not a universal password detector.
+Other
+sensitive applications should be added by `.exe` name on Windows or by
+`WM_CLASS` on Linux using the Exclusions settings page.
+
+Detailed technical logging can be enabled on the Maintenance page on Windows
+or the About page on Linux. It records the decision reason, scores for both
+interpretations, the skip reason (`skipped_reason`) and the detector's shadow
+verdict for protected or disabled cases, context, the source and age of a
+manual layout change, whether a layout change was made by the engine itself
+or by the user, deferred pause corrections with their cause, early-switch
+events, the rule offer lifecycle, added rules and the values of changed settings.
+Because it may
+contain typed words and application names, technical mode is disabled by
+default. Engine diagnostic events replace excluded-application text with
+`<redacted>`; this is not a general personal-data scrubber for all error messages.
+Words that look like a password go into the technical log as stars: the word
+typed right after «пароль», «пароля», «паролю», «паролем», «пароле», «password»
+or «passwd» (typed in either layout) and every token of eight characters or more
+with both letters and digits in it, in the word itself, its readings and
+replacements and the words around it; a word typed after such a marker stays
+masked in later records that name it again. A password shorter than eight
+characters, or of letters alone, typed without such a word before it, is logged
+as typed.
+The ordinary log uses 1 MiB per file and two backups; technical mode uses
+5 MiB and five backups (`keyswitch.log.1` … `.5`), up to six files in total.
+Enabling technical mode rotates a nonempty current file. Disabling it does
+not immediately erase existing records or old backups. After reproducing the
+issue, disable the mode, review files for private data and save the current log
+and backups covering the incident. `context_decision` does not include the
+surrounding phrase; `correction_applied` confirms event submission, not the
+final text. See [troubleshooting](docs/troubleshooting.md).
+
+The Base word model (KSLM) switch on the automatic-correction page disables only
+the baseline KSLM classifier; dictionaries, hard guards and the user's switching
+rules continue to work. The contextual assistant has a separate setting and
+is not disabled by this switch. Diagnostics show the bundled KSLM version and abbreviated
+SHA-256, or the reason for a safe fallback to the deterministic ensemble.
+Neither words nor model features are sent over the network.
+
+Confidence threshold and aggressive recognition configure the baseline
+detector's fallback heuristics, not the trained models' fixed thresholds.
+They can indirectly change the baseline decision seen by the assistant.
+Minimum length is not a universal ban on short words: explicit rules,
+reviewed short-word exceptions and contextual decisions can still apply.
+
+The following describes the baseline detector without contextual intervention
+in `off`/`shadow`. In `assist`, a separate model uses its lexical evidence and
+decision; KSLM certification does not certify that contextual policy.
+
+After user rules and the hard guards for valid source words, code and addresses,
+KSLM is the sole statistical decision: only its calibrated trigger/direction
+threshold is applied. Membership coverage and language-model scores remain
+diagnostics and cannot veto a positive decision already certified at that
+threshold. A negative result is not handed to the heuristic for a second
+chance. The deterministic ensemble is used only for short tokens, a disabled
+model, or a missing artifact.
+
+The linear layer runs only when at least one of the two normalized
+interpretations contains five or more characters. Shorter words remain with
+the deterministic heuristics and user rules: this removes the most ambiguous
+tail from probabilistic decisions without disabling correction as a whole.
+The trainer also excludes deletion typos that fall below this limit; the same
+limit is recorded in the hash-bound model policy and covered by tests.
+
+The configured minimum length does not block a narrow reviewed exception list
+for frequent two-letter function words; it currently contains Russian-layout
+`ша` to English `if`. The exception requires an exact target-language lexicon
+hit and at least a 100x target/source frequency ratio. An explicit manual
+layout change has higher priority and protects the entire next word, including
+pause correction and the user's switching rules. Normal detection resumes after
+the word boundary. Re-observing a layout the engine just selected within 1.5
+seconds does not create new protection as an external manual change would.
+An explicit menu language choice itself protects the next word, as does Pause
+when no replaceable word remains. A change to another layout stays manual.
+Real three- and four-character bilingual collision pairs from frozen Onboard
+data are retained only in the safety corpus: they never train the classifier,
+but prove the valid-source pre-model guard across every trigger.
+
+`layout_intent_v1.ksm` is the first classifier generation stored in KSLM
+schema 4. Alongside int16 weights, the sealed file (`model/intent_v1/`) holds
+sorted uint64 fingerprints for exact character-feature membership in an
+independent hash namespace, not an occupancy bitset of weight buckets. The
+fingerprints give only the diagnostic `coverage`, which no decision reads, so
+the package holds the same model without the table of fingerprints: 4.7 MB
+instead of 12.9 MB. The loader checks the schema, shape,
+ordering, CRC32 and SHA-256, bounds the complete file at 14 MiB, and safely
+disables the layer after any validation failure. Within that limit, the
+canonical embedded manifest is capped at 1 MiB, the payload at 12 MiB, and the
+exact membership-fingerprint count at `2^20`.
+The schema numbers are independent: the training config uses
+`schema_version: 13`, the container uses KSLM schema 4, and the external
+publication `manifest.json` uses `schema_version: 2` (since v26 it also pins
+the SHA-256 of the toolchain's named-constant values, `toolchain.constants_sha256`).
+
+The offline model uses 2,097,152 hash buckets and permits at most 64 epochs with
+deterministic early stopping. The frozen EN/RU lexicons are used in full after
+filtering; `maximum_words_per_language` must be zero so global truncation before
+the split cannot depend on held-out identities.
+The offline trainer discovers the logical CPUs available through process
+affinity and uses all of them by default for feature extraction and independent
+scoring. `--workers N` caps the worker-process count, while `--workers 1`
+enables single-process diagnostics. Worker output is reduced in original row
+order, so the worker count cannot alter online-FTRL ordering or candidate
+bytes. The online FTRL update itself remains sequential because every step
+depends on the state produced by the preceding example.
+Feature schema v5 is derived only from the source
+and alternative raw tokens: signed character 1–5-grams, direction, length,
+and trigger. Context fields, every `WordScore`, and every language-model score
+field are ignored by the classifier. Real short-lived context remains in the
+conservative detector heuristic and is not counted a second time in the linear
+score. The trainer invokes the same runtime extractor with the same seeds and
+n-gram orders, giving exact train/serve feature parity. A train-only EN/RU scorer
+remains as separate, checked provenance but is not a classifier input.
+Physical signatures are partitioned under
+`keyswitch:intent-v28:physical-signature`. Before row generation, the independent
+candidate phase quarantines every identity or typo signature owned by different
+pre-sealed splits/languages, or overlapping a protected/safety token. Sealed-test
+rows and their quarantine are built only after the exact candidate SHA has been
+atomically claimed; the merge removes test signatures exposed by candidate
+rows, quarantine or safety data and never changes candidate rows.
+
+Schema 13 additionally consumes the byte-frozen
+`unknown-typo-development-v28.json`. It was built model-blind before training
+from 5,000 EN and 5,000 RU Hunspell-unknown typos and compacted to one record
+per physical signature. An independent role namespace deterministically assigns
+each language half as 3,500/500/500/500 words across
+train/development/calibration/threshold; this corpus has no test role. On load,
+the trainer verifies file size and SHA-256, both Hunspell dictionary provenance
+records, layout-pair physical equivalence, uniqueness, exact role sizes, and
+the SHA-256 of all 120,000 re-expanded symmetric rows.
+Only the train role receives the config-bound `3.0` weight, equal to the
+ordinary frequency-derived weight ceiling; all three evaluation roles retain
+weight `1.0`. Critical unknown typos therefore remain influential during
+optimization without silently relaxing the unweighted quality measurements.
+The complete post-merge audit forbids role overlap and overlap with the
+original lexical/safety corpus.
+The independent v20 holdout uses distinct rank/choice namespaces and is never
+used for training or threshold selection.
+
+Calibration, threshold selection and sealed-test evaluation use neutral context
+as the primary slice. Fixed non-empty label-independent context-stress profiles
+additionally prove feature-schema-v5 context invariance: changing
+`context_delta` or `context_group` must not change the vector, logit or decision,
+and every profile passes the same per-trigger quality gates.
+
+Before the sealed test is opened, separate EN→RU/RU→EN thresholds are selected
+jointly for every trigger; both directional operating curves must contain both
+labels in the overall and typo slices. The aggregate trigger slice must pass the
+complete selection policy with neutral context: overall
+precision at least 0.9995, recall at least 0.956 and specificity at least 0.999;
+the typo slice uses the same strengthened selection precision of 0.9995,
+recall at least 0.91 and
+specificity at least 0.999. The 12 primary selection FPR checks (six triggers
+times overall and typo slices) use a Bonferroni correction: the family-wise 95%
+Wilson upper endpoint uses per-comparison confidence 0.9958333333333333 and a
+pinned z-score of 2.8652602385321333 and may not exceed 0.001. Signed gate
+evidence separately records the method, comparison count, confidence, z-score
+and computed endpoint; the independent sealed test keeps the ordinary 95%
+Wilson endpoint. Training config schema 13 additionally requires zero
+selection false positives per trigger across both the overall and typo slices
+and still requires the strengthened family-wise Wilson bound. This absolute
+budget is checked before the sealed
+test is materialized. After
+directional selection, schema 13 deterministically chooses on the threshold
+split the greatest common calibrated-logit margin that preserves the complete
+selection policy. The margin is bounded by a config-bound 2.0 cap fixed before v11
+from the model-blind unknown-typo development corpus. Under schema 13 those
+frozen signatures have independent roles, so the effective value is selected
+only on their threshold subset, recorded for every trigger, and threshold
+metrics are recomputed against the hardened boundaries. The sealed test does
+not participate in margin selection.
+For `pause`, selection recall is 0.91, typo recall is 0.86, and the same
+0.001 bound applies, and its logit threshold in
+each direction is at least 0.5 above the strictest non-pause threshold in that
+same direction. An infeasible selection policy stops training before sealed-test
+evaluation. The final sealed test keeps independent minimum precision 0.999,
+recall 0.95, typo recall 0.90, and pause recall 0.90/0.85. The precision
+difference and one percentage point of recall form a pre-seal transfer reserve
+without weakening the closed gate. Before the seal is claimed,
+the safety audit and selection veto must also pass, and the trainer serializes
+and reloads a trial KSLM through the runtime implementation to prove numeric
+bounds, quantization parity, and payload/fingerprint limits. The safety gate
+checks the actual production policy with runtime guards; direct model
+predictions and membership coverage remain non-gating raw diagnostics.
+
+The strict evaluator separately runs the real `LanguageDetector` under neutral
+context and six reachable extrema of production context arithmetic (deltas from
+-2.05 through +2.30) over sealed, sealed-typo, unknown-typo, safety, and
+source-known slices. Every profile must preserve precision, specificity and the
+Wilson FPR bound, have no more total false positives than either fallback or
+neutral, and respect the fixed asymmetric recall policy. The finite
+safety/source-known sets use the stronger exact-zero invariant: those rows must
+not reach the model, while every unknown-typo row must reach it.
+
+KSLM schema 4 stores independent monotonic Platt calibration for EN→RU and RU→EN
+plus the exact `threshold_logit` for every trigger/direction pair. Both
+calibrators are fit only on the calibration split and correct a systematic
+inter-direction score shift without changing the ordering within either
+direction. Runtime selects the threshold by trigger and physical direction, then
+compares the direction-calibrated logit directly with it; its sigmoid-derived
+confidence is diagnostic only and does not participate in the decision. The
+frozen external-evaluation policy pins sizes and SHA-256 digests of both
+languages' Hunspell `.dic`/`.aff` files; expected SHA-256 digests of the
+lexical-disjoint, unknown-typo development, and independent unknown-typo holdout
+corpora; at least 5,000 words per language; and the canonical set of all six
+triggers. The holdout uses distinct rank/choice namespaces and excludes every
+sealed and development signature. V11 passed its internal gates but was rejected
+before the independent external holdout because the strict evaluator could not
+fail-closed index the new frozen `hunspell-unknown-*` row family.
+`rejection-v11.json` preserves the cause and exact hashes. V12 fixed the index
+but was rejected because the evaluator built its base exclusion index after
+merging the development corpus and could not reproduce its frozen provenance.
+V13 fixed that domain separation and reached the independent holdout, but
+produced 4 false positives among 10,000 negatives for each ordinary trigger; its
+0.001028128 Wilson upper endpoint exceeded the 0.001 limit. `rejection-v12.json`
+and `rejection-v13.json` preserve the exact causes and hashes. V14 fixed a
+zero-FP selection budget before rotating every namespace and passed strict
+evaluation with 0 false positives among 60,000 unknown-typo negatives. V15
+rotated every namespace again after the trainer became multiprocess and passed
+strict evaluation on its new holdout with 12 false positives among 60,000
+negatives (2 per trigger slice, Wilson upper endpoint 0.000728996 against the
+0.001 limit) and recall 0.96935. After the FTRL loop moved into the native
+kernel, v16 and v17 failed the pre-sealed gate (zero-false-positive recall on
+their threshold splits was 0.9479 and 0.9458 against the 0.956 minimum; no
+registry was claimed). V18 passed the internal gates and the independent holdout
+(5 false positives among 60,000, recall 0.9425) but was rejected by the
+`fallback_regression` strict gate: one false positive introduced by the model
+relative to the deterministic fallback on the 5,000-row sealed sample;
+`rejection-v18.json` records the decision. V19 failed the pre-sealed gate again
+(recall 0.9463), while v20 passed every internal gate, the holdout (6 false
+positives among 60,000, recall 0.9445) and all 30 strict gates and became the
+current certified artifact. The toolchain-bound namespace rotation to v23
+accepted the candidate `intent-v1-b2a2ec8caa8d`, which became the next certified
+artifact. After the detector, the intent models and the training tools moved to
+named constants from `src/keyswitch/constants`, an exact replay of v23 on the
+refactored toolchain reproduced the same artifact, manifest and test report byte
+for byte, and the namespace rotated again. V24 passed training, the internal
+gates and the independent external holdout, but was rejected by the strict
+`production_context_ensemble` gate; the decision is recorded in
+`rejection-v24.json`. V25 failed threshold selection before the seal was
+claimed: selection recall was 0.951688289 (0.942078365 for pause) against the
+0.956 minimum; the decision is recorded in `rejection-v25.json`, no registry was
+created and the sealed test was never evaluated. V26 (`intent-v1-1a0edbe60e84`)
+and V27 (`intent-v1-cff4eaedc88a`) passed every internal gate, the independent
+holdout and the full set of 30 strict gates, but together with the retrained
+context model they did not keep the end-to-end criterion on the revealed
+sentence sets: with V26 one sentence fewer was restored by edits inside a word
+than with 0.32.0 (17,390 against 17,391), with V27 ordinary typing restored
+16,353 sentences against 16,367, so neither was chosen for the package. V28
+passed every internal gate, the independent holdout and the full set of 30
+strict gates, kept that criterion together with the context model, and became
+the current certified artifact. `holdout-v28-preseal.json` pins its SHA-256,
+namespaces, sizes and zero overlap before a v20 model is loaded or evaluated;
+`model_loaded=false` and `metrics_evaluated=false` make that phase explicit.
+
+The manifest binds hashes of the config, frozen sources, trainer, external
+evaluator, preseal generator/receipt, development-corpus freezer, intent
+runtime, layouts, language scorer, detector, frozen hard-negative source and
+protected-token list to the
+candidate/full datasets, both quarantines, excluded
+test signatures and train-only scorer provenance. The receipt binds the exact
+KSLM payload/runtime parameters and is published from an fsynced temporary file
+through an atomic no-replace hard link. Until that receipt is valid, the
+evaluator neither builds sealed-test rows nor prints their metrics, regardless
+of the `--strict` flag.
+After successful gates, pre-written and synced report, artifact and manifest
+files are published in that order; the manifest is the final commit marker and
+a process error rolls back destinations already replaced. The exact two-run
+procedure for byte-comparing all three outputs is in the
+[model card](model/intent_v1/MODEL_CARD.en.md#reproducibility).
+The steps of a new candidate are in the Russian [training cycle](docs/model-cycle.md).
+
+## Development and verification
+
+All the code is Rust, a Cargo workspace in `crates/`. Training and checking the models live in the `ks-train` program, the release in `ks-release`.
+
+```bash
+cargo test -p ks-text -p ks-backend -p ks-config -p ks-lang -p ks-context -p ks-engine -p ks-replay -p ks-updates -p ks-ui -p ks-win -p ks-train
+cargo test --release -p ks-replay
+```
+
+`ks-replay` runs the engine over recorded behaviour: what was pressed, what the backend answered, which events came out. The Windows code is checked by building it for each architecture: `cargo check -p ks-win --target x86_64-pc-windows-msvc`.
+
+Checks of the models whose files are in the repository:
+
+```bash
+cargo build --profile train -p ks-train
+target/train/ks-train verify --tree .
+target/train/ks-train boundary --tree . --verify
+target/train/ks-train ortho --tree . --verify
+target/train/ks-train ortho --tree . --inputs
+target/train/ks-train intent --tree . --verify
+target/train/ks-train intent --tree . --evaluate --strict --output strict.json
+target/train/ks-train archive --tree .
+target/train/ks-train detector --tree . --sample 10000 --dictionary-sample 10000 --strict
+```
+
+Training each model, freezing corpora and the measurements are in the Russian [training cycle](docs/model-cycle.md), the other checks in the [verification guide](docs/verification.md). The architecture and criteria are in [DESIGN.md](DESIGN.md), the reasoning behind the model in the [detection overview](docs/detection-research.en.md).
+
+Packages: `packaging/build-rust-deb.sh` (DEB), `packaging/build-rust.ps1` (Windows installer and ZIP, needs Inno Setup), `packaging/build-rust-macos.sh` (the macOS application). The [`ci.yml`](.github/workflows/ci.yml) workflow builds them on every commit and publishes the files of a tag.
+
+A release happens **only after an explicit decision to release**, and the command commits and pushes everything in the tree:
+
+```bash
+target/train/ks-release --version X.Y.Z --dry-run
+target/train/ks-release --version X.Y.Z --field-root <tree with the typing> --field-released <reports of the last release>
+```
+
+## Limitations
+
+- On Wayland, GNOME Shell, KDE Plasma 6 and sway are supported (see [Wayland](#wayland));
+  KeySwitch does not start in other compositors. It does not work on Wayland
+  together with programs that grab the keyboard themselves (keyd, kanata,
+  xremap, input-remapper): only one program can grab a keyboard.
+- The default automatic language models target the EN/RU layout pair.
+- Applications with custom input handling and remote desktops may process
+  synthetic events differently; these applications can be added to the
+  exclusions list.
+- On Windows, UIPI prevents a regular process from injecting input into a
+  window running at a higher integrity level. KeySwitch needs a matching level
+  for that target window.
+- Typing through TeamViewer and other remote-access programs is corrected by
+  KeySwitch on the computer the user types on; on the controlled computer such
+  input does not count as typing (the setting «Ввод от других программ»).
+- The 32-bit Windows build is tested, keystrokes included, on 64-bit Windows,
+  where 32-bit programs run through WOW64: CI has no machine with 32-bit Windows.
+- The published Windows 0.73.0 Setup EXE is not signed with a publisher certificate.
+- macOS: the spelling autocorrection (in TextEdit, for example) can change a word
+  at the space before KeySwitch does; KeySwitch then does not write over that
+  edit and the word stays as it is. Turning autocorrection off in such an
+  application avoids it.
+
+## Privacy
+
+KeySwitch processes keystrokes, words and model features on the computer where
+it runs. Typed text, switching rules, history and logs are not sent anywhere.
+
+The only network requests KeySwitch makes are update checks against the GitHub
+Releases of this repository: `api.github.com`, plus `github.com` and
+`release-assets.githubusercontent.com` when a Windows installer or a macOS archive
+is downloaded. The
+requests identify only the installed KeySwitch version
+(`User-Agent: KeySwitch/<version>`). GitHub receives the IP address, as with any
+web request, and the
+[GitHub privacy statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement)
+applies. Automatic checking and automatic installation are described in
+[Install on Windows](#install-on-windows) and [Install on macOS](#install-on-macos)
+and can be turned off on the Updates
+page; a check then runs only on the Check now («Проверить сейчас») button. The
+Debian package adds an APT source for <https://olegius88.github.io/keyswitch/>,
+which the system package manager contacts on its own schedule
+([Updates through APT](#updates-through-apt)).
+
+LogCourier, a separate application in this repository that is not included in
+KeySwitch packages, sends only the log files the user selects, only to the
+Telegram group the user configures, and only after sending is enabled in its
+settings. The [Telegram privacy policy](https://telegram.org/privacy) applies to
+that transfer.
+
+## Code signing policy
+
+Windows releases are not signed yet (see [Limitations](#limitations)). Signing,
+once enabled, follows these rules:
+
+- Only files produced from a tagged commit of this repository by the
+  [CI and release](.github/workflows/ci.yml) workflow on GitHub-hosted
+  runners are signed: the KeySwitch executables and the Setup EXE. Nothing built
+  on a developer machine is signed.
+- Every signing request is approved manually.
+- Team roles:
+  - committers and reviewers: [Oleg Shevchuk (@olegius88)](https://github.com/olegius88);
+  - approvers: [Oleg Shevchuk (@olegius88)](https://github.com/olegius88).
+- Team members use multi-factor authentication for GitHub and for the signing
+  service.
+- Privacy policy: [Privacy](#privacy).
+
+## License
+
+KeySwitch is distributed under the
+[GNU General Public License 3.0 or later](LICENSE).
+The bundled model is built from a frozen snapshot of Onboard `models/*` from
+`onboard-data` `1.4.3+git20260213+ds-2`. Its original declaration records
+GPL-3+ and credits marmuta (2013, 2014) and Francesco Fumanti (2011, 2012).
+The exact `.lm` files, `SHA256SUMS` and unchanged `COPYRIGHT.onboard-data` live
+under `model/intent_v1/sources`; the copyright file is included in both the
+Debian and Windows license bundles.
+
+The separate expanded-context research corpus uses Tatoeba's public CC0
+export. [Source provenance and numeric-cache licensing](model/context_v2/sources/README.md)
+are documented separately; they do not replace the Onboard or project license.
+This research corpus is not bundled as a runtime dictionary.
+
+## Primary specifications
+
+- [Google Research: FTRL-Proximal](https://research.google/pubs/ad-click-prediction-a-view-from-the-trenches/)
+  — the sparse linear model's offline training algorithm;
+- [AISTATS/PMLR: Beta calibration](https://proceedings.mlr.press/v54/kull17a.html)
+  — primary work on an alternative binary calibration method; Layout Intent v1
+  uses a simpler Platt transform fitted on a separate split;
+- [ACL Anthology: character n-grams for short segments](https://aclanthology.org/L10-1193/)
+  — research on n-gram identification of short text;
+- [Microsoft LowLevelKeyboardProc](https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelkeyboardproc)
+  — low-level keyboard hook and required message loop;
+- [Microsoft SendInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput)
+  — synthetic input and the UIPI limitation;
+- [Microsoft ToUnicodeEx](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-tounicodeex)
+  — translating a virtual key with a selected layout;
+- [Microsoft Run and RunOnce keys](https://learn.microsoft.com/en-us/windows/win32/setupapi/run-and-runonce-registry-keys)
+  — per-user startup after Windows login;
+- [X.Org RECORD Extension Library](https://www.x.org/releases/current/doc/libXtst/recordlib.pdf)
+  — context creation and event capture;
+- [X.Org XTEST Extension Library](https://www.x.org/releases/current/doc/libXtst/xtestlib.pdf)
+  — synthetic KeyPress and KeyRelease events;
+- [X.Org XKB Library Specification](https://www.x.org/releases/current/doc/libX11/XKB/xkblib.html)
+  — groups, Shift levels and keycode-to-keysym conversion;
+- [Freedesktop Autostart Specification](https://specifications.freedesktop.org/autostart/0.5/)
+  — the per-user `~/.config/autostart/*.desktop` entry;
+- [Freedesktop StatusNotifierItem](https://specifications.freedesktop.org/status-notifier-item/latest-single/)
+  — desktop panel indicator integration;
+- [Canonical DBusMenu interface](https://sources.debian.org/src/libdbusmenu/18.10.20180917~bzr492%2Brepack1-2/libdbusmenu-glib/dbus-menu.xml/)
+  — native desktop-indicator popup menu;
+- [official Ubuntu 26.04 LTS release notes](https://documentation.ubuntu.com/release-notes/26.04/).

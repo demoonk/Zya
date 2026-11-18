@@ -1,0 +1,1664 @@
+unit Ghbdtn.Analyzer;
+
+interface
+
+uses
+  System.SysUtils,
+  System.Character,
+  Ghbdtn.Layout,
+  Ghbdtn.Phrase;
+
+type
+  THeuristicMode = (hmCautious, hmBalanced, hmAggressive);
+  TCaseMode = (cmInvert, cmUpper, cmLower, cmCapitalize);
+  TDecisionMark = (dmNone, dmLearning, dmDictionary, dmLeave);
+  TNeverSwitchCallback = reference to function(const AWord: string): Boolean;
+  TPreferSwitchCallback = reference to function(const AWord: string): Boolean;
+
+  TAnalysisResult = record
+    NeedsSwitch: Boolean;
+    TargetLang: TLangKind;
+    ConvertedText: string;
+    Mark: TDecisionMark;
+  end;
+
+const
+  // How many typed letters of a word the early switch waits for.
+  EarlyLettersMin = 3;
+  EarlyLettersMax = 8;
+  EarlyLettersDefault = 4;
+
+function AnalyzeWord(const AWord: string; ACurrentLang: TLangKind): TAnalysisResult; overload;
+function AnalyzeWord(const AWord: string; ACurrentLang: TLangKind;
+  AMode: THeuristicMode; const ANeverSwitch: TNeverSwitchCallback): TAnalysisResult; overload;
+function AnalyzeWord(const AWord: string; ACurrentLang: TLangKind;
+  AMode: THeuristicMode; const ANeverSwitch: TNeverSwitchCallback;
+  const APreferSwitch: TPreferSwitchCallback): TAnalysisResult; overload;
+function AnalyzeWord(const AWord: string; ACurrentLang: TLangKind;
+  AMode: THeuristicMode; const ANeverSwitch: TNeverSwitchCallback;
+  const APreferSwitch: TPreferSwitchCallback;
+  const APhrase: TPhraseContext): TAnalysisResult; overload;
+{ Whether the beginning of a word that is still being typed is already clearly
+  text of the other layout. Only a prefix that starts no word of the typed
+  language and does start a word of the other one is switched. }
+function AnalyzeWordPrefix(const APrefix: string; ACurrentLang: TLangKind;
+  AMinLetters: Integer; AMode: THeuristicMode;
+  const ANeverSwitch: TNeverSwitchCallback): TAnalysisResult;
+{ ALine ends with a word of AWordLength characters that is being switched to
+  Russian. When one space before it stands a one- or two-letter word typed on
+  the English layout whose Russian text is a function word ("D yfxfkt": "D"
+  is "В"), the word is returned: a short word at the start of a phrase is
+  left alone by itself, but it belongs to the words after it. }
+function TryPrecedingShortWord(const ALine: string; AWordLength: Integer;
+  out AWord: string): Boolean;
+{ Like TryPrecedingShortWord, for a short word closed by "?" and a space before
+  the word being switched ("Ye? gjrf": "Ye?" is "Ну,"). The "?" key is the
+  Russian comma. }
+function TryShortWordBeforeQuestion(const ALine: string; AWordLength: Integer;
+  out AWord: string): Boolean;
+{ APhrase holds the words before the one just typed on the Russian layout and
+  ends with a short word left on the English layout. That word is Russian
+  when it starts the phrase or follows Russian words ("b" is "и"); after an
+  English word it is English ("plan b"). }
+function ShortWordStartsRussianPhrase(const APhrase: TPhraseContext): Boolean;
+{ Three or more of the key that types "ё" on the Russian layout: a code fence
+  typed on the wrong layout. No Russian word looks like that. }
+function IsCodeFenceKeys(const AText: string): Boolean;
+function IsCaretSymbolChar(C: Char): Boolean;
+function IsEnglishQuestionMarker(const AText: string): Boolean;
+function AnalyzeSelection(const AText: string; AMode: THeuristicMode;
+  const ANeverSwitch: TNeverSwitchCallback): TAnalysisResult;
+function ConvertSelectionSmart(const AText: string; AMode: THeuristicMode;
+  const ANeverSwitch: TNeverSwitchCallback): string; overload;
+function ConvertSelectionSmart(const AText: string; AMode: THeuristicMode;
+  const ANeverSwitch: TNeverSwitchCallback;
+  const APreferSwitch: TPreferSwitchCallback): string; overload;
+function ConvertManualSelection(const AText: string; AMode: THeuristicMode;
+  const ANeverSwitch: TNeverSwitchCallback;
+  const APreferSwitch: TPreferSwitchCallback): string;
+function TryWordAtCaret(const AText: string; ACaret: Integer;
+  out AStart, AEnd: Integer): Boolean;
+function InvertLetterCase(const AText: string): string;
+{ cmCapitalize puts the first letter of each sentence in capitals and the
+  rest in lower case. }
+function ApplyCaseMode(const AText: string; AMode: TCaseMode): string;
+{ Line breaks as a single LF, for comparing text read back from an editor. }
+function NormalizeLineBreaks(const AText: string): string;
+{ How many times Left moves the caret across AText: a line break (CRLF, CR
+  or LF) and a surrogate pair each count once. }
+function CaretStepCount(const AText: string): Integer;
+function TryFixInitialCapitals(const AWord: string; out AFixed: string): Boolean;
+function TryFixCapsLockWord(const AWord: string; out AFixed: string): Boolean;
+{ ALine is the text typed since the caret last moved. True when it ends with
+  a word, one space and a single mark from ", . ! ?": the space is a typo and
+  the mark belongs right after the word. ":" and ";" are left alone because
+  they open emoticons, and "." is only judged here, once the next key ends
+  the word, so ".env" and "..." are not affected. }
+function TryFixSpaceBeforeMark(const ALine: string; out AMark: Char): Boolean;
+{ True when ALine ends with a space that follows text: a further space typed
+  there is a repeat. Indentation and runs of leading spaces do not count. }
+function IsRedundantSpace(const ALine: string): Boolean;
+
+type
+  TLineFix = (lfSpacing, lfLetterTypos, lfSentenceCapital, lfDash, lfQuotes,
+    lfRepeatedWord);
+  TLineFixes = set of TLineFix;
+
+{ A one-letter slip in a word of at least five letters: two neighbouring
+  letters swapped ("првиет") or one letter doubled ("приивет"). The word is
+  corrected only when it is not in the frequency list and exactly one such
+  edit gives a word that is. Words with digits, a mixed script or capitals
+  after the first letter are never touched. }
+function TryFixLetterTypo(const AWord: string; out AFixed: string): Boolean;
+{ ALine is the text typed since the caret last moved and ADelimiter the key
+  that ends the word being typed (a space, #9 or #13). The first of the
+  enabled fixes that applies replaces the last AOldLength characters of ALine
+  with ANewText. ALearnWord is the lowercase word to keep as typed when the fix
+  is taken back, or empty. AKept says whether a word was taken back before. }
+function TryFixLineTail(const ALine: string; ADelimiter: Char;
+  AFixes: TLineFixes; const AKept: TNeverSwitchCallback;
+  out AOldLength: Integer; out ANewText, ALearnWord: string): Boolean;
+function NormalizeAnalyzedWord(const AWord: string): string;
+
+implementation
+
+uses
+  System.Math,
+  Ghbdtn.Diagnostics,
+  Ghbdtn.Heuristics,
+  Ghbdtn.LetterModel,
+  Ghbdtn.Reading,
+  Ghbdtn.WordFreq;
+
+const
+  // Quarter-bits (4 points = 1 bit) the other layout's reading must be ahead
+  // by before the word is switched.
+  SwitchEvidenceMargin = 28;
+  CautiousExtraMargin = 12;
+  AggressiveLessMargin = 8;
+  UnknownLayoutMargin = 36;
+  // How much less evidence is needed when the other layout's reading is a
+  // word of the frequency list and the typed text is not one: short frequent
+  // words ("ult" is "где") have too few letters to clear the full margin.
+  ListedWordLessMargin = 8;
+  // The costliest letter of a text that still reads as a word of its
+  // language, with the word end counted as a letter.
+  PlausibleRussianLetterCost = 24;
+  PlausibleEnglishLetterCost = 26;
+  // What a capital Russian letter inside a word costs: the English layout
+  // types it with Shift on the same keys as ":", "<" or "{", so code such as
+  // a:b or a<b would otherwise read as a Russian word.
+  InnerCapitalKeyCost = 48;
+  // The beginning of a word is judged only while it has at most this many
+  // letters.
+  EarlySwitchMaxLetters = 12;
+  // The manual gesture switches a word unless what was typed is clearly the
+  // better reading: the other reading may trail by this much (a negative
+  // margin), so words the automatic rule refuses are still converted.
+  ManualSwitchMargin = -16;
+
+function LayoutToken(ALang: TLangKind): string;
+begin
+  case ALang of
+    lkRU: Result := 'RU';
+    lkEN: Result := 'EN';
+  else
+    Result := 'unknown';
+  end;
+end;
+
+function ModeToken(AMode: THeuristicMode): string;
+begin
+  case AMode of
+    hmCautious: Result := 'cautious';
+    hmBalanced: Result := 'balanced';
+    hmAggressive: Result := 'aggressive';
+  else
+    Result := 'balanced';
+  end;
+end;
+
+function QuoteTrace(const AValue: string): string;
+begin
+  Result := '"' + AValue.Replace('"', '''').Replace(#13, ' ').Replace(#10, ' ') + '"';
+end;
+
+function ReadingTrace(const APrefix: string; const AReading: TReading): string;
+begin
+  Result :=
+    ' ' + APrefix + '_cost=' + IntToStr(AReading.Cost) +
+    ' ' + APrefix + '_listed=' + IntToStr(Ord(AReading.Listed));
+end;
+
+procedure TraceHeuristic(const ADetail: string);
+begin
+  if EffectiveDiagnosticsLevel >= dlVerbose then
+    LogDiagnostic(dlVerbose, deHeuristicDecision, 0, ADetail);
+end;
+
+function SwitchMargin(AMode: THeuristicMode; ALayoutKnown: Boolean): Integer;
+begin
+  // An unknown layout has no mode adjustment: the bar stays fixed.
+  if not ALayoutKnown then
+    Exit(UnknownLayoutMargin);
+  Result := SwitchEvidenceMargin;
+  case AMode of
+    hmCautious:
+      Inc(Result, CautiousExtraMargin);
+    hmAggressive:
+      Dec(Result, AggressiveLessMargin);
+  end;
+end;
+
+function IsDottedExtension(const ALower: string): Boolean;
+begin
+  Result := (Length(ALower) >= 3) and (ALower[1] = '.') and
+    IsFileExtension(Copy(ALower, 2, MaxInt));
+end;
+
+function TypedLayout(const AText: string; ACurrentLang: TLangKind): TLangKind;
+var
+  I: Integer;
+begin
+  if ACurrentLang <> lkUnknown then
+    Exit(ACurrentLang);
+  // The first letter says which alphabet the word is written in; keys such as
+  // "," that type Russian letters on the English layout say nothing.
+  for I := 1 to Length(AText) do
+    if CharInSet(AText[I], ['a'..'z', 'A'..'Z']) then
+      Exit(lkEN)
+    else if Ord(AText[I]) > 127 then
+      Exit(lkRU);
+  Result := lkEN;
+end;
+
+{ The text of a word the layout reading is measured on: punctuation around it
+  is dropped, except the keys of the English layout that type Russian letters,
+  which may be part of the word. }
+function InnerCapitalKeyCount(const AText: string): Integer;
+var
+  I: Integer;
+begin
+  Result := 0;
+  for I := 2 to Length(AText) do
+    if CharInSet(AText[I], [':', '<', '>', '"', '{', '}', '~']) then
+      Inc(Result);
+end;
+
+function TrimToReading(const AWord: string; ALayout: TLangKind): string;
+var
+  StartIdx, EndIdx: Integer;
+
+  function Belongs(C: Char): Boolean;
+  begin
+    Result := CharInSet(C, ['a'..'z', 'A'..'Z', '0'..'9']) or (Ord(C) > 127) or
+      ((ALayout <> lkRU) and IsRussianLetterKey(C));
+  end;
+
+begin
+  StartIdx := 1;
+  EndIdx := Length(AWord);
+  while (StartIdx <= EndIdx) and not Belongs(AWord[StartIdx]) do
+    Inc(StartIdx);
+  while (EndIdx >= StartIdx) and not Belongs(AWord[EndIdx]) do
+    Dec(EndIdx);
+  Result := Copy(AWord, StartIdx, EndIdx - StartIdx + 1);
+end;
+
+function CleanWordString(const S: string): string;
+var
+  StartIdx, EndIdx: Integer;
+begin
+  StartIdx := 1;
+  EndIdx := Length(S);
+  while (StartIdx <= EndIdx) and not (CharInSet(S[StartIdx], ['a'..'z', 'A'..'Z', '0'..'9']) or (Ord(S[StartIdx]) > 127)) do
+    Inc(StartIdx);
+  while (EndIdx >= StartIdx) and not (CharInSet(S[EndIdx], ['a'..'z', 'A'..'Z', '0'..'9']) or (Ord(S[EndIdx]) > 127)) do
+    Dec(EndIdx);
+
+  if StartIdx <= EndIdx then
+    Result := Copy(S, StartIdx, EndIdx - StartIdx + 1)
+  else
+    Result := S;
+end;
+
+function NormalizeAnalyzedWord(const AWord: string): string;
+begin
+  Result := CleanWordString(AWord).ToLower;
+  if Result = '' then
+    Result := AWord.ToLower;
+end;
+
+function IsCodeFenceKeys(const AText: string): Boolean;
+var
+  I: Integer;
+begin
+  Result := Length(AText) >= 3;
+  for I := 1 to Length(AText) do
+    if (AText[I] <> 'ё') and (AText[I] <> 'Ё') then
+      Exit(False);
+end;
+
+function HasShiftedLetterKey(const AText: string): Boolean;
+var
+  I: Integer;
+begin
+  // Shift of ; ' [ ] , . ` : the capitals Ж Э Х Ъ Б Ю Ё. A trailing "."
+  // after "OK" is not one of these.
+  for I := 1 to Length(AText) do
+    if CharInSet(AText[I], [':', '<', '>', '"', '{', '}', '~']) then
+      Exit(True);
+  Result := False;
+end;
+
+{ Two to four capitals and nothing else, such as "API" or "SK". }
+function IsShortAbbreviation(const S: string): Boolean;
+var
+  I, LetterCount: Integer;
+  C: Char;
+begin
+  Result := False;
+  LetterCount := 0;
+  for I := 1 to Length(S) do
+  begin
+    C := S[I];
+    if not C.IsLetter then
+      Exit;
+    if not C.IsUpper then
+      Exit;
+    Inc(LetterCount);
+  end;
+  Result := (LetterCount >= 2) and (LetterCount <= 4);
+end;
+
+function IsProtectedToken(const S: string): Boolean;
+var
+  I, LetterCount: Integer;
+  HasLatin, HasCyrillic, AllUpper: Boolean;
+  C: Char;
+begin
+  if (Pos('://', S) > 0) or (Pos('@', S) > 0) or
+     (Pos('\', S) > 0) or (Pos('/', S) > 0) or
+     (Pos('_', S) > 0) or (Pos('=', S) > 0) or
+     (Pos(':', S) > 0) then
+    Exit(True);
+
+  HasLatin := False;
+  HasCyrillic := False;
+  AllUpper := True;
+  LetterCount := 0;
+  for I := 1 to Length(S) do
+  begin
+    C := S[I];
+    if CharInSet(C, ['0'..'9']) then
+      Exit(True);
+
+    if CharInSet(C, ['a'..'z', 'A'..'Z']) then
+      HasLatin := True
+    else if ((C >= 'А') and (C <= 'я')) or (C = 'Ё') or (C = 'ё') then
+      HasCyrillic := True;
+
+    if C.IsLetter then
+    begin
+      Inc(LetterCount);
+      if not C.IsUpper then
+        AllUpper := False;
+    end;
+  end;
+
+  Result :=
+    (HasLatin and HasCyrillic) or
+    (AllUpper and (LetterCount >= 2) and (LetterCount <= 4));
+end;
+
+function AnalyzeWord(const AWord: string; ACurrentLang: TLangKind;
+  AMode: THeuristicMode; const ANeverSwitch: TNeverSwitchCallback): TAnalysisResult;
+begin
+  Result := AnalyzeWord(AWord, ACurrentLang, AMode, ANeverSwitch, nil);
+end;
+
+function AnalyzeWord(const AWord: string; ACurrentLang: TLangKind;
+  AMode: THeuristicMode; const ANeverSwitch: TNeverSwitchCallback;
+  const APreferSwitch: TPreferSwitchCallback): TAnalysisResult;
+begin
+  Result := AnalyzeWord(AWord, ACurrentLang, AMode, ANeverSwitch, APreferSwitch,
+    UntrackedPhrase);
+end;
+
+function IsCyrillicLetter(C: Char): Boolean;
+begin
+  Result := ((C >= 'А') and (C <= 'я')) or (C = 'Ё') or (C = 'ё');
+end;
+
+function IsLatinLetter(C: Char): Boolean;
+begin
+  Result := CharInSet(C, ['a'..'z', 'A'..'Z']);
+end;
+
+{ "отрtlfrnbhjdfyj": the layout changed inside the word, so its tail came out
+  in the other script. The tail is switched to the script the word started
+  in when the whole word then reads as a word of that language; otherwise the
+  mixed word stays protected. A Russian tail needs a Latin letter: "слово,"
+  ends in a mark, not in the key of "б". }
+function TryMixedLayoutWord(const AWord: string; out AFixed: string;
+  out ALang: TLangKind): Boolean;
+var
+  Split, I, Plausible: Integer;
+  HasLatin: Boolean;
+  Reading: TReading;
+begin
+  Result := False;
+  AFixed := '';
+  ALang := lkUnknown;
+  if Length(AWord) < 4 then
+    Exit;
+  Split := 1;
+  if IsCyrillicLetter(AWord[1]) then
+  begin
+    while (Split <= Length(AWord)) and IsCyrillicLetter(AWord[Split]) do
+      Inc(Split);
+    HasLatin := False;
+    for I := Split to Length(AWord) do
+      if IsLatinLetter(AWord[I]) then
+        HasLatin := True
+      else if not IsRussianLetterKey(AWord[I]) then
+        Exit;
+    if not HasLatin then
+      Exit;
+    ALang := lkRU;
+  end
+  else if IsLatinLetter(AWord[1]) then
+  begin
+    while (Split <= Length(AWord)) and IsLatinLetter(AWord[Split]) do
+      Inc(Split);
+    for I := Split to Length(AWord) do
+      if not IsCyrillicLetter(AWord[I]) then
+        Exit;
+    ALang := lkEN;
+  end
+  else
+    Exit;
+  // At least two letters of the first script and one of the other.
+  if (Split < 3) or (Split > Length(AWord)) then
+    Exit;
+  AFixed := Copy(AWord, 1, Split - 1) + ConvertStringSwap(Copy(AWord, Split, MaxInt));
+  if ALang = lkRU then
+  begin
+    Reading := ReadAsRussian(AFixed.ToLower);
+    Plausible := PlausibleRussianLetterCost;
+  end
+  else
+  begin
+    Reading := ReadAsEnglish(AFixed.ToLower);
+    Plausible := PlausibleEnglishLetterCost;
+  end;
+  Result := Reading.Valid and (Reading.Listed or
+    (HasVowel(AFixed.ToLower, ALang) and
+     (Reading.PlainCost <= Plausible * (Length(AFixed) + 1))));
+end;
+
+{ "работюьв": a Russian word with a file extension typed on the Russian layout
+  ("ю" is the period). The stem has to be a listed word so that a Russian word
+  that merely ends in such letters is left alone; the extension is converted
+  and the stem stays Russian. }
+function TryGluedExtension(const AWord: string; out AFixed: string): Boolean;
+var
+  I, Len, ExtLen: Integer;
+  Stem, Tail: string;
+begin
+  Result := False;
+  AFixed := '';
+  Len := Length(AWord);
+  if Len < 6 then
+    Exit;
+  for I := 1 to Len do
+    if not IsCyrillicLetter(AWord[I]) then
+      Exit;
+  if ReadAsRussian(AWord.ToLower).Listed then
+    Exit;
+  for ExtLen := 2 to 4 do
+  begin
+    if Len - ExtLen - 1 < 3 then
+      Break;
+    Tail := Copy(AWord, Len - ExtLen, ExtLen + 1);
+    if (Tail[1] <> 'ю') or
+       not IsDottedExtension(ConvertStringSwap(Tail).ToLower) then
+      Continue;
+    Stem := Copy(AWord, 1, Len - ExtLen - 1);
+    if ReadAsRussian(Stem.ToLower).Listed then
+    begin
+      AFixed := Stem + ConvertStringSwap(Tail);
+      Exit(True);
+    end;
+  end;
+end;
+
+function AnalyzeWordCore(const AWord: string; ACurrentLang: TLangKind;
+  AMode: THeuristicMode; const ANeverSwitch: TNeverSwitchCallback;
+  const APreferSwitch: TPreferSwitchCallback;
+  const APhrase: TPhraseContext; AManual: Boolean): TAnalysisResult;
+var
+  CleanW: string;
+  LowerWord: string;
+  ReadText: string;
+  ReadCased: string;
+  OtherText: string;
+  Converted: string;
+  SourceLayout: TLangKind;
+  OtherLayout: TLangKind;
+  Typed: TReading;
+  Other: TReading;
+  Margin: Integer;
+  Bias: Integer;
+  Delta: Integer;
+  Plausible: Integer;
+  KeptStart, KeptStop, Offset: Integer;
+  ShortWord: string;
+  TermText: string;
+  MixedText: string;
+  MixedLang: TLangKind;
+  Head: string;
+begin
+  Result.NeedsSwitch := False;
+  Result.TargetLang := lkUnknown;
+  Result.ConvertedText := '';
+  Result.Mark := dmNone;
+  KeptStart := 1;
+  KeptStop := MaxInt;
+
+  CleanW := CleanWordString(AWord);
+  if CleanW = '' then
+    CleanW := AWord;
+  LowerWord := CleanW.ToLower;
+  Head := 'word=' + QuoteTrace(LowerWord) + ' layout=' + LayoutToken(ACurrentLang) +
+    ' mode=' + ModeToken(AMode);
+  if Assigned(ANeverSwitch) and ANeverSwitch(LowerWord) then
+  begin
+    Result.Mark := dmLearning;
+    TraceHeuristic(Head + ' reason=never_switch switch=0');
+    Exit;
+  end;
+  if TryMixedLayoutWord(AWord, MixedText, MixedLang) then
+  begin
+    Result.NeedsSwitch := True;
+    Result.TargetLang := MixedLang;
+    Result.ConvertedText := MixedText;
+    TraceHeuristic(Head + ' reason=mixed_layout switch=1 target=' +
+      LayoutToken(MixedLang) + ' converted=' + QuoteTrace(MixedText.ToLower));
+    Exit;
+  end;
+  if (ACurrentLang <> lkEN) and IsCodeFenceKeys(AWord) then
+  begin
+    Result.NeedsSwitch := True;
+    Result.TargetLang := lkEN;
+    Result.ConvertedText := ConvertStringSwap(AWord);
+    TraceHeuristic(Head + ' reason=code_fence switch=1 target=EN');
+    Exit;
+  end;
+  // ":BPYM" is "ЖИЗНЬ" and "<SK" is "БЫЛ": the capital was stripped before
+  // the abbreviation check, so the key has to be seen on the original word.
+  // A colon between other letters stays protected: it is also "key:value".
+  if IsProtectedToken(CleanW) and
+     not (IsShortAbbreviation(CleanW) and HasShiftedLetterKey(AWord)) then
+  begin
+    Result.Mark := dmLeave;
+    TraceHeuristic(Head + ' reason=protected switch=0');
+    Exit;
+  end;
+  SourceLayout := TypedLayout(AWord, ACurrentLang);
+  // A learned preference does not turn a Russian preposition or conjunction
+  // typed among Russian words into English ("в" -> "d"). A single letter typed
+  // by itself in a tracked phrase is not switched by a preference either: it is
+  // as likely a Russian word ("в", "с", "к") as a Latin one, and the word that
+  // follows decides it.
+  if Assigned(APreferSwitch) and APreferSwitch(LowerWord) and
+     not (not AManual and not APhrase.Untracked and
+          (((SourceLayout = lkRU) and PhraseEndsWith(APhrase, lkRU) and
+            (Length(LowerWord) <= 2) and IsRussianFunctionWord(LowerWord)) or
+           (Length(LowerWord) = 1))) then
+  begin
+    Result.Mark := dmLearning;
+    Result.NeedsSwitch := True;
+    Result.ConvertedText := ConvertStringSwap(AWord);
+    if SourceLayout = lkEN then
+      Result.TargetLang := lkRU
+    else
+      Result.TargetLang := lkEN;
+    TraceHeuristic(Head + ' reason=learned_prefer switch=1 target=' +
+      LayoutToken(Result.TargetLang) + ' converted=' +
+      QuoteTrace(Result.ConvertedText.ToLower));
+    Exit;
+  end;
+  // A one- or two-letter Russian function word ("и", "не", "на") is too short
+  // to score. Typed after Russian words it is taken as Russian; at the start
+  // of a phrase it stays put, since "vs" or "c" is just as likely English.
+  // Keys of Russian letters on the edge count as letters here: "'nj" is the
+  // three-letter "это", not the short "то" in quotes.
+  ShortWord := TrimToReading(AWord, lkEN);
+  if ShortWord = '' then
+    ShortWord := CleanW;
+  if (Length(ShortWord) <= 2) and (ACurrentLang <> lkRU) and
+     IsRussianFunctionWord(ConvertStringSwap(ShortWord).ToLower) then
+  begin
+    if AManual or APhrase.Untracked or PhraseEndsWith(APhrase, lkRU) then
+    begin
+      Result.Mark := dmDictionary;
+      Result.NeedsSwitch := True;
+      Result.TargetLang := lkRU;
+      Result.ConvertedText := ConvertStringSwap(AWord);
+      TraceHeuristic(Head + ' reason=short_layout switch=1 target=RU converted=' +
+        QuoteTrace(Result.ConvertedText.ToLower));
+    end
+    else
+      TraceHeuristic(Head + ' reason=short_needs_context switch=0');
+    Exit;
+  end;
+  ReadCased := TrimToReading(AWord, SourceLayout);
+  ReadText := ReadCased.ToLower;
+  if Length(ReadText) < 2 then
+  begin
+    TraceHeuristic(Head + ' reason=too_short switch=0');
+    Exit;
+  end;
+  // "юзва" is ".pdf" typed on the Russian layout. A file extension has no
+  // vowels or letter sequences to score, so it is recognized from the list.
+  if (ACurrentLang <> lkEN) and IsDottedExtension(ConvertStringSwap(CleanW).ToLower) then
+  begin
+    Result.Mark := dmDictionary;
+    Result.NeedsSwitch := True;
+    Result.TargetLang := lkEN;
+    Result.ConvertedText := ConvertStringSwap(AWord);
+    TraceHeuristic(Head + ' reason=file_extension switch=1 target=EN converted=' +
+      QuoteTrace(Result.ConvertedText.ToLower));
+    Exit;
+  end;
+  if (ACurrentLang <> lkEN) and TryGluedExtension(CleanW, MixedText) then
+  begin
+    Result.Mark := dmDictionary;
+    Result.NeedsSwitch := True;
+    Result.TargetLang := lkRU;
+    Result.ConvertedText := MixedText;
+    TraceHeuristic(Head + ' reason=glued_extension switch=1 target=RU converted=' +
+      QuoteTrace(MixedText.ToLower));
+    Exit;
+  end;
+  // "вум" is "dev" typed on the Russian layout, and "ctrl" typed as it is
+  // stays put. A term whose Russian reading is a listed word ("exe" is
+  // "учу") is left to the score.
+  if SourceLayout = lkRU then
+    TermText := ConvertStringSwap(ReadText).ToLower
+  else
+    TermText := ReadText;
+  if IsTechnicalTerm(TermText) and
+     not ReadAsRussian(ConvertStringSwap(TermText)).Listed then
+  begin
+    if SourceLayout = lkRU then
+    begin
+      Result.Mark := dmDictionary;
+      Result.NeedsSwitch := True;
+      Result.TargetLang := lkEN;
+      Result.ConvertedText := ConvertStringSwap(AWord);
+      TraceHeuristic(Head + ' reason=technical_term switch=1 target=EN converted=' +
+        QuoteTrace(Result.ConvertedText.ToLower));
+    end
+    else
+    begin
+      Result.Mark := dmLeave;
+      TraceHeuristic(Head + ' reason=technical_term switch=0');
+    end;
+    Exit;
+  end;
+
+  Converted := ConvertStringSwap(AWord);
+  OtherText := ConvertStringSwap(ReadText).ToLower;
+  if SourceLayout = lkEN then
+  begin
+    OtherLayout := lkRU;
+    Typed := ReadAsEnglish(ReadText);
+    Other := ReadAsRussianKeepingEdges(ReadText, KeptStart, KeptStop);
+    // A shifted key kept as a letter is a capital inside the word. A key
+    // given up as punctuation is not part of that word.
+    Inc(Other.Cost, InnerCapitalKeyCost * InnerCapitalKeyCount(
+      Copy(ReadCased, KeptStart, KeptStop - KeptStart + 1)));
+  end
+  else
+  begin
+    OtherLayout := lkEN;
+    Typed := ReadAsRussian(ReadText);
+    Other := ReadAsEnglish(OtherText);
+  end;
+  if not (Typed.Valid and Other.Valid) then
+  begin
+    // Every key of the typed word is a Russian letter, so there is no
+    // English reading ("`;" is "ёж", "'[" is "эх"). Switch when that reading
+    // is a listed word. "ё" is stored as "е", and that fold also turns "ёё"
+    // into "ее" and "жё" into "же", which are different words, so a reading
+    // that contains "ё" is accepted only for "ёж". "[]" and "<>" are not
+    // listed words.
+    if (SourceLayout = lkEN) and Other.Valid and
+       ((Other.Core = 'ёж') or ((Pos('ё', Other.Core) = 0) and Other.Listed)) then
+    begin
+      Result.NeedsSwitch := True;
+      Result.TargetLang := lkRU;
+      Result.ConvertedText := Converted;
+      Result.Mark := dmDictionary;
+      TraceHeuristic(Head + ' reason=letter_keys switch=1 target=RU converted=' +
+        QuoteTrace(Result.ConvertedText.ToLower));
+    end
+    else
+      TraceHeuristic(Head + ' reason=no_reading switch=0');
+    Exit;
+  end;
+  // A word of the other layout needs a vowel; without one the converted text
+  // is an abbreviation typed as it is (pdf, ltd), not a word typed wrongly.
+  // A Russian abbreviation of the word list (млн, снг) is the exception.
+  if (Length(Other.Core) >= 3) and not HasVowel(Other.Core, OtherLayout) and
+     not ((OtherLayout = lkRU) and Other.Listed) then
+  begin
+    TraceHeuristic(Head + ' reason=no_vowel switch=0');
+    Exit;
+  end;
+  // The text switched to must read as a word of its language by itself, not
+  // only be less improbable than what was typed: single letters joined by
+  // commas or periods ("a,b,c") read as nothing in either language.
+  if not Other.Listed then
+  begin
+    if OtherLayout = lkRU then
+      Plausible := PlausibleRussianLetterCost
+    else
+      Plausible := PlausibleEnglishLetterCost;
+    if Other.PlainCost > Plausible * (Length(Other.Core) + 1) then
+    begin
+      TraceHeuristic(Head + ' reason=implausible switch=0');
+      Exit;
+    end;
+  end;
+  Bias := PhraseScoreBias(APhrase, OtherLayout) -
+    PhraseScoreBias(APhrase, SourceLayout);
+  Delta := Typed.Cost - Other.Cost + Bias;
+  if AManual then
+    Margin := ManualSwitchMargin
+  else
+  begin
+    Margin := SwitchMargin(AMode, ACurrentLang <> lkUnknown);
+    if Other.Listed and not Typed.Listed then
+      Dec(Margin, ListedWordLessMargin);
+  end;
+  if Delta >= Margin then
+  begin
+    Result.NeedsSwitch := True;
+    Result.TargetLang := OtherLayout;
+    Result.ConvertedText := Converted;
+    if (SourceLayout = lkEN) and
+       ((KeptStart > 1) or (KeptStop < Length(ReadText))) then
+    begin
+      // The edge keys read as punctuation stay as typed.
+      Offset := Pos(ReadCased, AWord) - 1;
+      Result.ConvertedText :=
+        ConvertStringSwap(Copy(AWord, 1, Offset)) +
+        Copy(AWord, Offset + 1, KeptStart - 1) +
+        ConvertStringSwap(Copy(AWord, Offset + KeptStart,
+          KeptStop - KeptStart + 1)) +
+        Copy(AWord, Offset + KeptStop + 1, Length(ReadText) - KeptStop) +
+        ConvertStringSwap(Copy(AWord, Offset + Length(ReadText) + 1,
+          MaxInt));
+    end;
+    if Other.Listed then
+      Result.Mark := dmDictionary;
+  end;
+  TraceHeuristic(Head + ' reason=score typed=' + LayoutToken(SourceLayout) +
+    ' other=' + QuoteTrace(OtherText) +
+    ' phrase=' + IntToStr(Bias) +
+    ' margin=' + IntToStr(Margin) +
+    ' delta=' + IntToStr(Delta) +
+    ' switch=' + IntToStr(Ord(Result.NeedsSwitch)) +
+    ' target=' + LayoutToken(Result.TargetLang) +
+    ReadingTrace(LayoutToken(SourceLayout), Typed) +
+    ReadingTrace(LayoutToken(OtherLayout), Other));
+end;
+
+function AnalyzeWord(const AWord: string; ACurrentLang: TLangKind;
+  AMode: THeuristicMode; const ANeverSwitch: TNeverSwitchCallback;
+  const APreferSwitch: TPreferSwitchCallback;
+  const APhrase: TPhraseContext): TAnalysisResult;
+begin
+  Result := AnalyzeWordCore(AWord, ACurrentLang, AMode, ANeverSwitch,
+    APreferSwitch, APhrase, False);
+end;
+
+function AnalyzeWord(const AWord: string;
+  ACurrentLang: TLangKind): TAnalysisResult;
+begin
+  Result := AnalyzeWord(AWord, ACurrentLang, hmBalanced, nil);
+end;
+
+function IsPlainLayoutLetters(const AText: string; ALayout: TLangKind): Boolean;
+var
+  I: Integer;
+  C: Char;
+begin
+  Result := AText <> '';
+  for I := 1 to Length(AText) do
+  begin
+    C := AText[I];
+    if ALayout = lkEN then
+    begin
+      if not CharInSet(C, ['a'..'z', 'A'..'Z']) then
+        Exit(False);
+    end
+    else if not (((C >= 'а') and (C <= 'я')) or
+      ((C >= 'А') and (C <= 'Я'))) then
+      Exit(False);
+  end;
+end;
+
+function ShortWordEndingAt(const AHead: string; AWordEnd: Integer;
+  out AWord: string): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  AWord := '';
+  if AWordEnd < 1 then
+    Exit;
+  I := AWordEnd;
+  while (I >= 1) and CharInSet(AHead[I], ['a'..'z', 'A'..'Z']) do
+    Dec(I);
+  if (AWordEnd - I < 1) or (AWordEnd - I > 2) then
+    Exit;
+  if (I >= 1) and not CharInSet(AHead[I], [' ', #9, #10, #13, ',', ';', ':',
+    '!', '?', '(', '"']) then
+    Exit;
+  AWord := Copy(AHead, I + 1, AWordEnd - I);
+  Result := IsRussianFunctionWord(ConvertStringSwap(AWord).ToLower);
+  if not Result then
+    AWord := '';
+end;
+
+function TryPrecedingShortWord(const ALine: string; AWordLength: Integer;
+  out AWord: string): Boolean;
+var
+  Head: string;
+begin
+  AWord := '';
+  if (AWordLength <= 0) or (AWordLength >= Length(ALine)) then
+    Exit(False);
+  Head := Copy(ALine, 1, Length(ALine) - AWordLength);
+  if (Length(Head) < 2) or (Head[Length(Head)] <> ' ') then
+    Exit(False);
+  Result := ShortWordEndingAt(Head, Length(Head) - 1, AWord);
+end;
+
+function TryShortWordBeforeQuestion(const ALine: string; AWordLength: Integer;
+  out AWord: string): Boolean;
+var
+  Head: string;
+begin
+  AWord := '';
+  if (AWordLength <= 0) or (AWordLength >= Length(ALine)) then
+    Exit(False);
+  Head := Copy(ALine, 1, Length(ALine) - AWordLength);
+  if (Length(Head) < 3) or (Head[Length(Head)] <> ' ') or
+     (Head[Length(Head) - 1] <> '?') then
+    Exit(False);
+  Result := ShortWordEndingAt(Head, Length(Head) - 2, AWord);
+end;
+
+function ShortWordStartsRussianPhrase(const APhrase: TPhraseContext): Boolean;
+begin
+  Result := PhraseEndsWith(APhrase, lkEN) and
+    ((APhrase.Count = 1) or (APhrase.Languages[APhrase.Count - 2] = lkRU));
+end;
+
+function AnalyzeWordPrefix(const APrefix: string; ACurrentLang: TLangKind;
+  AMinLetters: Integer; AMode: THeuristicMode;
+  const ANeverSwitch: TNeverSwitchCallback): TAnalysisResult;
+var
+  Lower, OtherText, Head: string;
+  OtherLayout: TLangKind;
+  Margin, Delta: Integer;
+begin
+  Result.NeedsSwitch := False;
+  Result.TargetLang := lkUnknown;
+  Result.ConvertedText := '';
+  Result.Mark := dmNone;
+  if not (ACurrentLang in [lkEN, lkRU]) or
+     (Length(APrefix) < Max(AMinLetters, EarlyLettersMin)) or
+     (Length(APrefix) > EarlySwitchMaxLetters) or
+     not IsPlainLayoutLetters(APrefix, ACurrentLang) or
+     IsProtectedToken(APrefix) then
+    Exit;
+  if ACurrentLang = lkEN then
+    OtherLayout := lkRU
+  else
+    OtherLayout := lkEN;
+  Lower := APrefix.ToLower;
+  if Assigned(ANeverSwitch) and ANeverSwitch(Lower) then
+    Exit;
+  // "ctr" may still become "ctrl"; the whole word decides.
+  if (ACurrentLang = lkEN) and HasTechnicalTermWithPrefix(Lower) then
+    Exit;
+  OtherText := ConvertStringSwap(Lower);
+  if not IsPlainLayoutLetters(OtherText, OtherLayout) or
+     not HasVowel(OtherText, OtherLayout) or
+     HasWordWithPrefix(Lower, ACurrentLang) or
+     not HasWordWithPrefix(OtherText, OtherLayout) then
+    Exit;
+  Margin := SwitchMargin(AMode, True);
+  Delta := LetterModelPrefixCost(Lower, ACurrentLang) -
+    LetterModelPrefixCost(OtherText, OtherLayout);
+  if Delta >= Margin then
+  begin
+    Result.NeedsSwitch := True;
+    Result.TargetLang := OtherLayout;
+    Result.ConvertedText := ConvertStringSwap(APrefix);
+  end;
+  Head := 'prefix=' + QuoteTrace(Lower) + ' layout=' + LayoutToken(ACurrentLang) +
+    ' mode=' + ModeToken(AMode);
+  TraceHeuristic(Head + ' reason=early margin=' + IntToStr(Margin) +
+    ' delta=' + IntToStr(Delta) + ' switch=' + IntToStr(Ord(Result.NeedsSwitch)));
+end;
+
+function IsEnglishQuestionMarker(const AText: string): Boolean;
+var
+  I: Integer;
+  Letters: Integer;
+begin
+  // "hello?" or "a?" or "ok?": Latin letters, then '?' with no space.
+  Result := False;
+  if Length(AText) < 2 then
+    Exit;
+  if AText[Length(AText)] <> '?' then
+    Exit;
+  Letters := 0;
+  for I := 1 to Length(AText) - 1 do
+  begin
+    if not CharInSet(AText[I], ['a'..'z', 'A'..'Z']) then
+      Exit;
+    Inc(Letters);
+  end;
+  Result := Letters >= 1;
+end;
+
+function AnalyzeSelection(const AText: string; AMode: THeuristicMode;
+  const ANeverSwitch: TNeverSwitchCallback): TAnalysisResult;
+var
+  I: Integer;
+  StartIdx: Integer;
+  Token: string;
+  TokenResult: TAnalysisResult;
+  Lang: TLangKind;
+  AnyNeeds: Boolean;
+  Target: TLangKind;
+begin
+  Result.NeedsSwitch := False;
+  Result.TargetLang := lkUnknown;
+  Result.ConvertedText := '';
+  Result.Mark := dmNone;
+  if Trim(AText) = '' then
+    Exit;
+
+  AnyNeeds := False;
+  Target := lkUnknown;
+  I := 1;
+  while I <= Length(AText) do
+  begin
+    while (I <= Length(AText)) and CharInSet(AText[I], [' ', #9, #10, #13]) do
+      Inc(I);
+    if I > Length(AText) then
+      Break;
+    StartIdx := I;
+    while (I <= Length(AText)) and
+          not CharInSet(AText[I], [' ', #9, #10, #13]) do
+      Inc(I);
+    Token := Copy(AText, StartIdx, I - StartIdx);
+    if Length(Token) < 2 then
+      Continue;
+    Lang := TypedLayout(Token, lkUnknown);
+    TokenResult := AnalyzeWord(Token, Lang, AMode, ANeverSwitch);
+    if TokenResult.NeedsSwitch then
+    begin
+      AnyNeeds := True;
+      if Target = lkUnknown then
+        Target := TokenResult.TargetLang;
+    end;
+  end;
+
+  if not AnyNeeds then
+  begin
+    // Whole selection as one token (phrases without spaces still handled).
+    Lang := TypedLayout(AText, lkUnknown);
+    Result := AnalyzeWord(AText, Lang, AMode, ANeverSwitch);
+    if Result.NeedsSwitch then
+      Result.ConvertedText := ConvertStringSwap(AText);
+    Exit;
+  end;
+
+  Result.NeedsSwitch := True;
+  Result.TargetLang := Target;
+  Result.ConvertedText := ConvertStringSwap(AText);
+end;
+
+function ConvertSelectionSmart(const AText: string; AMode: THeuristicMode;
+  const ANeverSwitch: TNeverSwitchCallback): string;
+begin
+  Result := ConvertSelectionSmart(AText, AMode, ANeverSwitch, nil);
+end;
+
+{ Keys that are punctuation on one layout and another sign on the other, but
+  not a letter on either: "///" typed on the English layout is "..." on the
+  Russian one. }
+function IsCaretSymbolChar(C: Char): Boolean;
+begin
+  Result := CharInSet(C, ['/', '?', '@', '#', '$', '^', '&']) or (C = '№');
+end;
+
+function IsSymbolRun(const AText: string): Boolean;
+var
+  I: Integer;
+begin
+  Result := AText <> '';
+  for I := 1 to Length(AText) do
+    if not IsCaretSymbolChar(AText[I]) then
+      Exit(False);
+end;
+
+function ConvertTokens(const AText: string; AMode: THeuristicMode;
+  const ANeverSwitch: TNeverSwitchCallback;
+  const APreferSwitch: TPreferSwitchCallback; AManual: Boolean): string;
+var
+  I, StartIdx: Integer;
+  Token: string;
+  Lang: TLangKind;
+  Analysis: TAnalysisResult;
+begin
+  Result := '';
+  if AText = '' then
+    Exit;
+  I := 1;
+  while I <= Length(AText) do
+  begin
+    if CharInSet(AText[I], [' ', #9, #10, #13]) then
+    begin
+      Result := Result + AText[I];
+      Inc(I);
+      Continue;
+    end;
+    StartIdx := I;
+    while (I <= Length(AText)) and
+          not CharInSet(AText[I], [' ', #9, #10, #13]) do
+      Inc(I);
+    Token := Copy(AText, StartIdx, I - StartIdx);
+    if Token = '' then
+      Continue;
+    if AManual and IsSymbolRun(Token) then
+    begin
+      Result := Result + ConvertStringSwap(Token);
+      Continue;
+    end;
+    Lang := TypedLayout(Token, lkUnknown);
+    Analysis := AnalyzeWordCore(Token, Lang, AMode, ANeverSwitch,
+      APreferSwitch, UntrackedPhrase, AManual);
+    if Analysis.NeedsSwitch and (Analysis.ConvertedText <> '') then
+      Result := Result + Analysis.ConvertedText
+    else
+      Result := Result + Token;
+  end;
+end;
+
+function ConvertSelectionSmart(const AText: string; AMode: THeuristicMode;
+  const ANeverSwitch: TNeverSwitchCallback;
+  const APreferSwitch: TPreferSwitchCallback): string;
+begin
+  Result := ConvertTokens(AText, AMode, ANeverSwitch, APreferSwitch, False);
+end;
+
+function TextHasBothScripts(const AText: string): Boolean;
+var
+  I: Integer;
+  C: Char;
+  Latin, Cyrillic: Boolean;
+begin
+  Latin := False;
+  Cyrillic := False;
+  for I := 1 to Length(AText) do
+  begin
+    C := AText[I];
+    if CharInSet(C, ['a'..'z', 'A'..'Z']) then
+      Latin := True
+    else if ((C >= 'А') and (C <= 'я')) or (C = 'Ё') or (C = 'ё') then
+      Cyrillic := True;
+    if Latin and Cyrillic then
+      Exit(True);
+  end;
+  Result := False;
+end;
+
+function CountTokens(const AText: string): Integer;
+var
+  I: Integer;
+  InToken: Boolean;
+begin
+  Result := 0;
+  InToken := False;
+  for I := 1 to Length(AText) do
+    if CharInSet(AText[I], [' ', #9, #10, #13]) then
+      InToken := False
+    else if not InToken then
+    begin
+      InToken := True;
+      Inc(Result);
+    end;
+end;
+
+function ConvertManualSelection(const AText: string; AMode: THeuristicMode;
+  const ANeverSwitch: TNeverSwitchCallback;
+  const APreferSwitch: TPreferSwitchCallback): string;
+begin
+  // A single word is the one the gesture points at, so it is flipped whatever
+  // it reads like. In longer text each word is flipped unless what was typed
+  // is clearly the better reading, so words that already belong to their
+  // layout stay and the ones the automatic rule left alone are converted.
+  if (CountTokens(AText) <= 1) and not TextHasBothScripts(AText) then
+    Result := ConvertStringSwap(AText)
+  else
+    Result := ConvertTokens(AText, AMode, ANeverSwitch, APreferSwitch, True);
+end;
+
+function IsPlainLetter(C: Char): Boolean;
+begin
+  Result := CharInSet(C, ['a'..'z', 'A'..'Z']) or
+    ((C >= 'А') and (C <= 'я')) or (C = 'Ё') or (C = 'ё');
+end;
+
+function IsCaretWordChar(C: Char): Boolean;
+begin
+  Result := IsPlainLetter(C) or IsRussianLetterKey(C);
+end;
+
+
+function TryWordAtCaret(const AText: string; ACaret: Integer;
+  out AStart, AEnd: Integer): Boolean;
+var
+  Seed, BlobStart, BlobEnd, PlainStart, PlainEnd: Integer;
+  Blob: string;
+  Analysis: TAnalysisResult;
+  Reading: TReading;
+  KeptStart, KeptStop: Integer;
+
+  function PlainRun: Boolean;
+  begin
+    Result := PlainStart <> 0;
+    if not Result then
+      Exit;
+    if (ACaret < PlainStart - 1) or (ACaret > PlainEnd) then
+      Exit(False);
+    AStart := PlainStart - 1;
+    AEnd := PlainEnd;
+    Result := AEnd > AStart;
+  end;
+
+begin
+  // ACaret is a 0-based insertion point, the same kind EM_GETSEL returns.
+  // AStart is the first character and AEnd is the one after the last.
+  Result := False;
+  AStart := 0;
+  AEnd := 0;
+  if (AText = '') or (ACaret < 0) or (ACaret > Length(AText)) then
+    Exit;
+  if (ACaret < Length(AText)) and IsCaretWordChar(AText[ACaret + 1]) then
+    Seed := ACaret + 1
+  else if (ACaret > 0) and IsCaretWordChar(AText[ACaret]) then
+    Seed := ACaret
+  else
+  begin
+    // No letters here: a run of such signs is taken whole.
+    if (ACaret < Length(AText)) and IsCaretSymbolChar(AText[ACaret + 1]) then
+      Seed := ACaret + 1
+    else if (ACaret > 0) and IsCaretSymbolChar(AText[ACaret]) then
+      Seed := ACaret
+    else
+      Exit;
+    AStart := Seed;
+    AEnd := Seed;
+    while (AStart > 0) and IsCaretSymbolChar(AText[AStart]) do
+      Dec(AStart);
+    while (AEnd < Length(AText)) and IsCaretSymbolChar(AText[AEnd + 1]) do
+      Inc(AEnd);
+    Exit(True);
+  end;
+
+  BlobStart := Seed;
+  BlobEnd := Seed;
+  while (BlobStart > 1) and IsCaretWordChar(AText[BlobStart - 1]) do
+    Dec(BlobStart);
+  while (BlobEnd < Length(AText)) and IsCaretWordChar(AText[BlobEnd + 1]) do
+    Inc(BlobEnd);
+
+  PlainStart := 0;
+  PlainEnd := 0;
+  if (ACaret < Length(AText)) and IsPlainLetter(AText[ACaret + 1]) then
+    PlainStart := ACaret + 1
+  else if (ACaret > 0) and IsPlainLetter(AText[ACaret]) then
+    PlainStart := ACaret;
+  if PlainStart <> 0 then
+  begin
+    PlainEnd := PlainStart;
+    while (PlainStart > 1) and IsPlainLetter(AText[PlainStart - 1]) do
+      Dec(PlainStart);
+    while (PlainEnd < Length(AText)) and IsPlainLetter(AText[PlainEnd + 1]) do
+      Inc(PlainEnd);
+  end;
+
+  Blob := Copy(AText, BlobStart, BlobEnd - BlobStart + 1);
+  Analysis := AnalyzeWord(Blob, TypedLayout(Blob, lkUnknown));
+  if Analysis.NeedsSwitch and (Analysis.TargetLang = lkRU) then
+  begin
+    Reading := ReadAsRussianKeepingEdges(Blob.ToLower, KeptStart, KeptStop);
+    if Reading.Valid and (KeptStop >= KeptStart) then
+    begin
+      AStart := BlobStart + KeptStart - 2;
+      AEnd := BlobStart + KeptStop - 1;
+      if (AEnd > AStart) and (ACaret >= AStart) and (ACaret <= AEnd) then
+        Exit(True);
+    end;
+  end;
+  Result := PlainRun;
+end;
+
+function NormalizeLineBreaks(const AText: string): string;
+begin
+  Result := AText.Replace(#13#10, #10).Replace(#13, #10);
+end;
+
+function CaretStepCount(const AText: string): Integer;
+var
+  I: Integer;
+begin
+  Result := 0;
+  I := 1;
+  while I <= Length(AText) do
+  begin
+    if (AText[I] = #13) and (I < Length(AText)) and (AText[I + 1] = #10) then
+      Inc(I)
+    else if AText[I].IsHighSurrogate and (I < Length(AText)) and
+            AText[I + 1].IsLowSurrogate then
+      Inc(I);
+    Inc(Result);
+    Inc(I);
+  end;
+end;
+
+function TryFixInitialCapitals(const AWord: string; out AFixed: string): Boolean;
+var
+  I: Integer;
+  C: Char;
+  Latin, Cyrillic: Boolean;
+begin
+  AFixed := AWord;
+  Result := False;
+  // "ТОлько": two capitals followed only by lowercase letters. A longer run
+  // of capitals or a later capital is an acronym or a CamelCase name.
+  if Length(AWord) < 4 then
+    Exit;
+  Latin := False;
+  Cyrillic := False;
+  for I := 1 to Length(AWord) do
+  begin
+    C := AWord[I];
+    if CharInSet(C, ['a'..'z', 'A'..'Z']) then
+      Latin := True
+    else if ((C >= 'А') and (C <= 'я')) or (C = 'Ё') or (C = 'ё') then
+      Cyrillic := True
+    else
+      Exit;
+    if (I <= 2) and not C.IsUpper then
+      Exit;
+    if (I > 2) and not C.IsLower then
+      Exit;
+  end;
+  if Latin = Cyrillic then
+    Exit;
+  AFixed := AWord[1] + AWord.Substring(1).ToLower;
+  // Latin identifiers such as TForm or IUnknown have the same shape, so
+  // Latin words are corrected only when they are common English words.
+  if Latin and not IsCommonEnglishWord(AFixed.ToLower) then
+  begin
+    AFixed := AWord;
+    Exit;
+  end;
+  Result := True;
+end;
+
+function TryFixCapsLockWord(const AWord: string; out AFixed: string): Boolean;
+var
+  I: Integer;
+  C: Char;
+  Latin, Cyrillic: Boolean;
+begin
+  AFixed := AWord;
+  Result := False;
+  // "пРИВЕТ": a lowercase first letter followed only by capitals is what a
+  // word typed with Caps Lock on looks like when the first letter was shifted.
+  if Length(AWord) < 4 then
+    Exit;
+  Latin := False;
+  Cyrillic := False;
+  for I := 1 to Length(AWord) do
+  begin
+    C := AWord[I];
+    if CharInSet(C, ['a'..'z', 'A'..'Z']) then
+      Latin := True
+    else if ((C >= 'А') and (C <= 'я')) or (C = 'Ё') or (C = 'ё') then
+      Cyrillic := True
+    else
+      Exit;
+    if (I = 1) and not C.IsLower then
+      Exit;
+    if (I > 1) and not C.IsUpper then
+      Exit;
+  end;
+  if Latin = Cyrillic then
+    Exit;
+  AFixed := AWord[1].ToUpper + AWord.Substring(1).ToLower;
+  Result := True;
+end;
+
+function TryFixSpaceBeforeMark(const ALine: string; out AMark: Char): Boolean;
+var
+  N: Integer;
+  Host: Char;
+begin
+  AMark := #0;
+  Result := False;
+  N := Length(ALine);
+  if N < 3 then
+    Exit;
+  if not CharInSet(ALine[N], [',', '.', '!', '?']) or (ALine[N - 1] <> ' ') then
+    Exit;
+  Host := ALine[N - 2];
+  // A letter, a closing bracket or a closing guillemet; digits are left alone
+  // because "1 , 2" and "3 . 5" are not prose.
+  if not (Host.IsLetter or (Host = ')') or (Host = #$00BB)) then
+    Exit;
+  AMark := ALine[N];
+  Result := True;
+end;
+
+function IsRedundantSpace(const ALine: string): Boolean;
+var
+  N: Integer;
+begin
+  N := Length(ALine);
+  Result := (N >= 2) and (ALine[N] = ' ') and (ALine[N - 1] > ' ');
+end;
+
+function TryFixLetterTypo(const AWord: string; out AFixed: string): Boolean;
+var
+  Lang: TLangKind;
+  Lower, Candidate, Found: string;
+  I, Hits: Integer;
+  C: Char;
+
+  procedure Consider(const ACandidate: string);
+  begin
+    if WordCost(ACandidate, Lang) < 0 then
+      Exit;
+    if Found = '' then
+    begin
+      Found := ACandidate;
+      Hits := 1;
+    end
+    else if ACandidate <> Found then
+      Inc(Hits);
+  end;
+
+begin
+  AFixed := AWord;
+  Result := False;
+  if Length(AWord) < 5 then
+    Exit;
+  if IsCyrillicLetter(AWord[1]) then
+    Lang := lkRU
+  else if IsLatinLetter(AWord[1]) then
+    Lang := lkEN
+  else
+    Exit;
+  for I := 1 to Length(AWord) do
+  begin
+    C := AWord[I];
+    if (Lang = lkRU) and not IsCyrillicLetter(C) then
+      Exit;
+    if (Lang = lkEN) and not IsLatinLetter(C) then
+      Exit;
+    if (I > 1) and not C.IsLower then
+      Exit;
+  end;
+  Lower := AWord.ToLower;
+  if WordCost(Lower, Lang) >= 0 then
+    Exit;
+  Found := '';
+  Hits := 0;
+  for I := 1 to Length(Lower) - 1 do
+    if Lower[I] <> Lower[I + 1] then
+    begin
+      Candidate := Lower;
+      Candidate[I] := Lower[I + 1];
+      Candidate[I + 1] := Lower[I];
+      Consider(Candidate);
+    end
+    else
+      Consider(Copy(Lower, 1, I) + Copy(Lower, I + 2, MaxInt));
+  if Hits <> 1 then
+    Exit;
+  AFixed := Found;
+  if AWord[1].IsUpper then
+    AFixed[1] := AFixed[1].ToUpper;
+  Result := True;
+end;
+
+const
+  // Longest quoted text turned into guillemets; a longer span is more likely
+  // two unrelated quotes than one pair.
+  MaxQuoteSpan = 80;
+  // Words that end in a period without ending a sentence.
+  Abbreviations =
+    ' т д е г ул им см рис напр руб коп стр тыс млн mr mrs ms dr etc vs ';
+  // Words that are written twice in a row on purpose.
+  DoubledWords =
+    ' что как ну да нет очень так вот пока тише бей ха ага that had very bye no yes ha ';
+
+function IsLineSpace(C: Char): Boolean;
+begin
+  Result := CharInSet(C, [' ', #9, #10, #13]);
+end;
+
+function LastTokenStart(const ALine: string): Integer;
+begin
+  Result := Length(ALine);
+  while (Result > 0) and not IsLineSpace(ALine[Result]) do
+    Dec(Result);
+  Inc(Result);
+end;
+
+function IsAllLetters(const AText: string): Boolean;
+var
+  I: Integer;
+begin
+  Result := AText <> '';
+  for I := 1 to Length(AText) do
+    if not AText[I].IsLetter then
+      Exit(False);
+end;
+
+{ The token starting at ATokStart opens a sentence: a period, "!" or "?"
+  and a space come before it. A period after an abbreviation, an initial, a
+  number or another period does not end a sentence. }
+function IsSentenceStart(const ALine: string; ATokStart: Integer): Boolean;
+var
+  I, J: Integer;
+  Prev: string;
+begin
+  Result := False;
+  I := ATokStart - 1;
+  if (I < 1) or (ALine[I] <> ' ') then
+    Exit;
+  while (I > 0) and (ALine[I] = ' ') do
+    Dec(I);
+  if (I < 1) or not CharInSet(ALine[I], ['.', '!', '?']) then
+    Exit;
+  if ALine[I] <> '.' then
+    Exit(True);
+  if (I < 2) or (ALine[I - 1] = '.') or ALine[I - 1].IsDigit then
+    Exit;
+  J := I - 1;
+  while (J > 0) and ALine[J].IsLetter do
+    Dec(J);
+  if (J > 0) and (ALine[J] = '.') then
+    Exit;
+  Prev := Copy(ALine, J + 1, I - 1 - J).ToLower;
+  Result := (Length(Prev) >= 2) and (Pos(' ' + Prev + ' ', Abbreviations) = 0);
+end;
+
+function TryFixLineTail(const ALine: string; ADelimiter: Char;
+  AFixes: TLineFixes; const AKept: TNeverSwitchCallback;
+  out AOldLength: Integer; out ANewText, ALearnWord: string): Boolean;
+var
+  N, TokStart, CoreStart, CoreEnd, E, O, I, P: Integer;
+  Mark: Char;
+  Token, Core, Fixed, Trail, Prev: string;
+
+  function Done(AOld: Integer; const ANew: string): Boolean;
+  begin
+    AOldLength := AOld;
+    ANewText := ANew;
+    Result := True;
+  end;
+
+  function IsKept(const AWord: string): Boolean;
+  begin
+    Result := Assigned(AKept) and AKept(AWord.ToLower);
+  end;
+
+begin
+  AOldLength := 0;
+  ANewText := '';
+  ALearnWord := '';
+  Result := False;
+  N := Length(ALine);
+  if N = 0 then
+    Exit;
+  TokStart := LastTokenStart(ALine);
+  Token := Copy(ALine, TokStart, MaxInt);
+
+  if lfSpacing in AFixes then
+  begin
+    if TryFixSpaceBeforeMark(ALine, Mark) then
+      Exit(Done(2, Mark));
+    if (N >= 3) and (ALine[N] = ')') and (ALine[N - 1] = ' ') and
+       ALine[N - 2].IsLetterOrDigit then
+      Exit(Done(2, ')'));
+    if (N >= 3) and (ALine[N] = ',') and (ALine[N - 1] = ',') and
+       (ALine[N - 2].IsLetterOrDigit or (ALine[N - 2] = ')')) then
+      Exit(Done(2, ','));
+    // "( word" -> "(word"; a bracket glued to a name is a call, not prose.
+    if (TokStart > 2) and (TokStart <= N) and (ALine[TokStart - 1] = ' ') and
+       (ALine[TokStart - 2] = '(') and
+       ((TokStart = 3) or IsLineSpace(ALine[TokStart - 3])) then
+      Exit(Done(N - TokStart + 3, '(' + Token));
+    // "слово,слово" typed in Russian: a space follows the comma.
+    P := Pos(',', Token);
+    if (P > 1) and (P < Length(Token)) and (Pos(',', Token, P + 1) = 0) and
+       IsCyrillicLetter(Token[P - 1]) and IsCyrillicLetter(Token[P + 1]) then
+    begin
+      Fixed := Token;
+      Insert(' ', Fixed, P + 1);
+      Exit(Done(Length(Token), Fixed));
+    end;
+  end;
+
+  if (lfDash in AFixes) and (ADelimiter = ' ') and (N >= 3) and
+     (ALine[N] = '-') and (ALine[N - 1] = ' ') and
+     (ALine[N - 2].IsLetterOrDigit or (ALine[N - 2] = ')') or
+      (ALine[N - 2] = #$00BB)) then
+    Exit(Done(1, #$2013));
+
+  if lfQuotes in AFixes then
+  begin
+    E := N;
+    Trail := '';
+    if CharInSet(ALine[E], [',', '.', '!', '?', ';', ':']) then
+    begin
+      Trail := ALine[E];
+      Dec(E);
+    end;
+    if (E > 2) and (ALine[E] = '"') then
+    begin
+      O := E - 1;
+      while (O > 0) and (ALine[O] <> '"') do
+        Dec(O);
+      if (O > 0) and (E - O > 1) and (E - O <= MaxQuoteSpan) and
+         ((O = 1) or CharInSet(ALine[O - 1], [' ', #9, '(', '['])) and
+         (ALine[O + 1] > ' ') and (ALine[E - 1] > ' ') then
+        Exit(Done(N - O + 1,
+          #$00AB + Copy(ALine, O + 1, E - O - 1) + #$00BB + Trail));
+    end;
+  end;
+
+  if (lfRepeatedWord in AFixes) and (TokStart > 1) and (TokStart <= N) and
+     (ALine[TokStart - 1] = ' ') and (Length(Token) >= 2) and
+     IsAllLetters(Token) then
+  begin
+    I := TokStart - 2;
+    while (I > 0) and not IsLineSpace(ALine[I]) do
+      Dec(I);
+    Prev := Copy(ALine, I + 1, TokStart - 2 - I);
+    if (Prev.ToLower = Token.ToLower) and
+       (Pos(' ' + Token.ToLower + ' ', DoubledWords) = 0) then
+      Exit(Done(Length(Token) + 1, ''));
+  end;
+
+  if AFixes * [lfLetterTypos, lfSentenceCapital] <> [] then
+  begin
+    CoreStart := TokStart;
+    while (CoreStart <= N) and
+          ((ALine[CoreStart] = #$00AB) or
+           CharInSet(ALine[CoreStart], ['(', '[', '"'])) do
+      Inc(CoreStart);
+    CoreEnd := N;
+    while (CoreEnd >= CoreStart) and
+          ((ALine[CoreEnd] = #$00BB) or
+           CharInSet(ALine[CoreEnd],
+             [',', '.', '!', '?', ';', ':', ')', ']', '"'])) do
+      Dec(CoreEnd);
+    if CoreEnd < CoreStart then
+      Exit;
+    Core := Copy(ALine, CoreStart, CoreEnd - CoreStart + 1);
+    Trail := Copy(ALine, CoreEnd + 1, MaxInt);
+    Fixed := Core;
+    if (lfLetterTypos in AFixes) and not IsKept(Core) and
+       TryFixLetterTypo(Core, Prev) then
+      Fixed := Prev;
+    if (lfSentenceCapital in AFixes) and IsAllLetters(Fixed) and
+       Fixed[1].IsLower and not IsKept(Fixed) and
+       IsSentenceStart(ALine, TokStart) then
+      Fixed[1] := Fixed[1].ToUpper;
+    if Fixed <> Core then
+    begin
+      ALearnWord := Core.ToLower;
+      Exit(Done(Length(Core) + Length(Trail), Fixed + Trail));
+    end;
+  end;
+end;
+
+function ApplyCaseMode(const AText: string; AMode: TCaseMode): string;
+var
+  I: Integer;
+  C: Char;
+  SentenceStart: Boolean;
+begin
+  case AMode of
+    cmUpper:
+      Exit(AText.ToUpper);
+    cmLower:
+      Exit(AText.ToLower);
+    cmInvert:
+      Exit(InvertLetterCase(AText));
+  end;
+  Result := AText;
+  SentenceStart := True;
+  for I := 1 to Length(Result) do
+  begin
+    C := Result[I];
+    if C.IsLetter then
+    begin
+      if SentenceStart then
+        Result[I] := C.ToUpper
+      else
+        Result[I] := C.ToLower;
+      SentenceStart := False;
+    end
+    else if CharInSet(C, ['.', '!', '?', #10, #13]) then
+      SentenceStart := True;
+  end;
+end;
+
+function InvertLetterCase(const AText: string): string;
+var
+  I: Integer;
+  C: Char;
+begin
+  Result := AText;
+  for I := 1 to Length(Result) do
+  begin
+    C := Result[I];
+    if not C.IsLetter then
+      Continue;
+    if C.IsUpper then
+      Result[I] := C.ToLower
+    else
+      Result[I] := C.ToUpper;
+  end;
+end;
+
+end.

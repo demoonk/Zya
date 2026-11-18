@@ -1,0 +1,14 @@
+#build
+/target
+
+# scratch output from test runs
+*_err.txt
+*_out.txt
+article_run*.txt
+wintest*.txt
+verbose_*.txt
+headless_run.txt
+icon_test.*
+tg_*.bmp
+tg_*.png
+

@@ -1,0 +1,155 @@
+Технический словарь: статистика по 20 статьям (3dnews.ru, ixbt.com)
+======================================================================
+статей: 20, знаков: 212306, токенов: 3994
+терминов в tech.json: 317
+
+Топ-60 технических токенов в corpus:
+  nvidia                   217 [lexicon]
+  pro                      152
+  apple                    104 [lexicon]
+  huawei                    91 [lexicon]
+  google                    83 [lexicon]
+  p40                       65 [lexicon]
+  com                       58
+  dnews                     51
+  ixbt                      50
+  of                        48
+  jpg                       46
+  the                       44
+  samsung                   43 [lexicon]
+  store                     42
+  cookie                    40
+  hpc                       37 [lexicon]
+  max                       34
+  rtx                       34 [lexicon]
+  ultra                     33
+  c                         33
+  img                       32
+  fugaku                    32 [lexicon]
+  app                       31
+  spark                     30
+  icloud                    30 [lexicon]
+  tesla                     30 [lexicon]
+  xiaomi                    30 [lexicon]
+  dgx                       27 [lexicon]
+  deepseek                  24 [lexicon]
+  g                         23
+  intel                     23 [lexicon]
+  oled                      22 [lexicon]
+  arm                       21
+  rubin                     21
+  oukitel                   21 [lexicon]
+  instagram                 20
+  macbook                   20 [lexicon]
+  android                   19 [lexicon]
+  witcher                   19 [lexicon]
+  extreme                   19
+  rx                        19
+  play                      18
+  music                     18
+  px-1                      18 [lexicon]
+  xt                        18
+  iii                       17
+  iphone                    16 [lexicon]
+  cuda                      16 [lexicon]
+  ti                        16
+  magic                     15
+  screenshot                14 [lexicon]
+  playstation               14 [lexicon]
+  blackwell                 14
+  heroes                    14
+  might                     14
+  ubisoft                   14 [lexicon]
+  gpu                       13 [lexicon]
+  dram                      13
+  megaspeed                 13 [lexicon]
+  gemini                    13
+
+Термины, которые движок восстанавливает из «не той» раскладки:
+  (в скобках — что реально набирается на RU-раскладке)
+  nvidia          набор на RU-раскладке: тмшвшф         (в corpus 219 раз)
+  huawei          набор на RU-раскладке: рлфцуш         (в corpus 93 раз)
+  p40             набор на RU-раскладке: з40            (в corpus 65 раз)
+  samsung         набор на RU-раскладке: ыфьылтп        (в corpus 45 раз)
+  hpc             набор на RU-раскладке: рзс            (в corpus 37 раз)
+  rtx             набор на RU-раскладке: кеч            (в corpus 36 раз)
+  xiaomi          набор на RU-раскладке: чшфщьш         (в corpus 32 раз)
+  fugaku          набор на RU-раскладке: алпфлл         (в corpus 32 раз)
+  icloud          набор на RU-раскладке: шсдщлв         (в corpus 30 раз)
+  oled            набор на RU-раскладке: щдув           (в corpus 28 раз)
+  dgx             набор на RU-раскладке: впч            (в corpus 27 раз)
+  deepseek        набор на RU-раскладке: вуузыуул       (в corpus 24 раз)
+  oukitel         набор на RU-раскладке: щллшеуд        (в corpus 21 раз)
+  witcher         набор на RU-раскладке: цшесрук        (в corpus 19 раз)
+  cuda            набор на RU-раскладке: слвф           (в corpus 18 раз)
+  px-1            набор на RU-раскладке: зч-1           (в corpus 18 раз)
+  gpu             набор на RU-раскладке: пзл            (в corpus 16 раз)
+  tdp             набор на RU-раскладке: евз            (в corpus 14 раз)
+  screenshot      набор на RU-раскладке: ыскуутырще     (в corpus 14 раз)
+  ubisoft         набор на RU-раскладке: лишыщае        (в corpus 14 раз)
+  ssd             набор на RU-раскладке: ыыв            (в corpus 13 раз)
+  megaspeed       набор на RU-раскладке: ьупфызуув      (в corpus 13 раз)
+  starlink        набор на RU-раскладке: ыефкдштл       (в corpus 12 раз)
+  gta             набор на RU-раскладке: пеф            (в corpus 12 раз)
+  d270            набор на RU-раскладке: в270           (в corpus 12 раз)
+  alibaba         набор на RU-раскладке: фдшифиф        (в corpus 12 раз)
+  ddr4            набор на RU-раскладке: ввк4           (в corpus 11 раз)
+  amd             набор на RU-раскладке: фьв            (в corpus 11 раз)
+  computex        набор на RU-раскладке: сщьзлеуч       (в corpus 11 раз)
+  rgb             набор на RU-раскладке: кпи            (в corpus 11 раз)
+  leica           набор на RU-раскладке: душсф          (в corpus 11 раз)
+  qwen3           набор на RU-раскладке: йцут3          (в corpus 11 раз)
+  airbus          набор на RU-раскладке: фшкилы         (в corpus 11 раз)
+  mwc             набор на RU-раскладке: ьцс            (в corpus 10 раз)
+  ifa             набор на RU-раскладке: шаф            (в corpus 10 раз)
+  ctrl            набор на RU-раскладке: секд           (в corpus 10 раз)
+  url             набор на RU-раскладке: лкд            (в corpus 10 раз)
+  btc             набор на RU-раскладке: иес            (в corpus 10 раз)
+  bch             набор на RU-раскладке: иср            (в corpus 10 раз)
+  ltc             набор на RU-раскладке: дес            (в corpus 10 раз)
+  window-new      набор на RU-раскладке: цштвщц-туц     (в corpus 10 раз)
+  dawnwalker      набор на RU-раскладке: вфцтцфдлук     (в corpus 10 раз)
+  cyberpunk       набор на RU-раскладке: сниукзлтл      (в corpus 10 раз)
+  lanl            набор на RU-раскладке: дфтд           (в corpus 10 раз)
+  maverick-2      набор на RU-раскладке: ьфмукшсл-2     (в corpus 10 раз)
+  nextsilicon     набор на RU-раскладке: тучеышдшсщт    (в corpus 10 раз)
+  thermaltake     набор на RU-раскладке: ерукьфдефлу    (в corpus 10 раз)
+  swafan          набор на RU-раскладке: ыцфафт         (в corpus 10 раз)
+  aws             набор на RU-раскладке: фцы            (в corpus 10 раз)
+  openai          набор на RU-раскладке: щзутфш         (в corpus 10 раз)
+  qwen4-max       набор на RU-раскладке: йцут4-ьфч      (в corpus 10 раз)
+  starlift        набор на RU-раскладке: ыефкдшае       (в corpus 10 раз)
+  ocarina         набор на RU-раскладке: щсфкштф        (в corpus 10 раз)
+  l8              набор на RU-раскладке: д8             (в corpus 10 раз)
+  livis           набор на RU-раскладке: дшмшы          (в corpus 10 раз)
+  avior           набор на RU-раскладке: фмшщк          (в corpus 10 раз)
+  timeweb         набор на RU-раскладке: ешьуцуи        (в corpus 10 раз)
+  g3              набор на RU-раскладке: п3             (в corpus 10 раз)
+  gpd             набор на RU-раскладке: пзв            (в corpus 10 раз)
+  fsd             набор на RU-раскладке: аыв            (в corpus 10 раз)
+  belkacar        набор на RU-раскладке: иудлфсфк       (в corpus 10 раз)
+  geforce         набор на RU-раскладке: пуащксу        (в corpus 9 раз)
+  ax3000          набор на RU-раскладке: фч3000         (в corpus 9 раз)
+  am4             набор на RU-раскладке: фь4            (в corpus 9 раз)
+  lga             набор на RU-раскладке: дпф            (в corpus 9 раз)
+  remastered      набор на RU-раскладке: куьфыеукув     (в corpus 9 раз)
+  x9b             набор на RU-раскладке: ч9и            (в corpus 9 раз)
+  ip68            набор на RU-раскладке: шз68           (в corpus 7 раз)
+  cortex-a76      набор на RU-раскладке: сщкеуч-ф76     (в corpus 7 раз)
+  type-c          набор на RU-раскладке: ензу-с         (в corpus 7 раз)
+  nano-sim        набор на RU-раскладке: тфтщ-ышь       (в corpus 7 раз)
+  ppi             набор на RU-раскладке: ззш            (в corpus 6 раз)
+  lte             набор на RU-раскладке: деу            (в corpus 6 раз)
+  radeon          набор на RU-раскладке: кфвущт         (в corpus 5 раз)
+  amoled          набор на RU-раскладке: фьщдув         (в corpus 5 раз)
+  s20             набор на RU-раскладке: ы20            (в corpus 5 раз)
+  gsm             набор на RU-раскладке: пыь            (в corpus 5 раз)
+  hsdpa           набор на RU-раскладке: рывзф          (в corpus 5 раз)
+  a-gps           набор на RU-раскладке: ф-пзы          (в corpus 5 раз)
+  beidou          набор на RU-раскладке: иушвщл         (в corpus 5 раз)
+  ... всего 80 терминов с нетривиальным зеркалом
+
+Реальные кириллические написания тех-терминов в статьях:
+  ли             (имеется в виду kb) x2
+
+Сводка: 317 терминов, 1834 вхождений в corpus
