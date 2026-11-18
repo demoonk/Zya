@@ -67,7 +67,15 @@ fn usage() {
         \n\
         исключения: exclude_processes — по имени процесса, exclude_dirs — по папке,\n\
         из которой запущена программа (например \"c:\\games\").\n\
+        exclude add <процесс>          добавить процесс в исключения\n\
+        exclude add-dir <папка>        добавить папку в исключения\n\
+        exclude remove <процесс>       удалить процесс из исключений\n\
+        exclude remove-dir <папка>     удалить папку из исключений\n\
+        exclude list                   показать исключения\n\
+        exclude clear                  сбросить исключения\n\
         автозапуск: autostart в config.json или меню значка в трее.\n\
+        меню значка: \"Исключить активное окно\", \"Исключить папку активного окна\",\n\
+        \"Исключения\" — список и удаление.\n\
         \n\
         переменные окружения:\n\
           ZYA_VERBOSE=1   подробный вывод решений в консоль\n"
@@ -139,6 +147,90 @@ fn main() -> anyhow::Result<()> {
             println!("запустить сейчас: zя run");
         } else {
             println!("zя: не удалось зарегистрировать автозапуск");
+        }
+        return Ok(());
+    }
+
+    if cmd == "exclude" {
+        let sub = args.get(1).map(|s| s.as_str()).unwrap_or("list");
+        let mut cfg = config::load();
+        match sub {
+            "add" | "process" | "prog" | "program" => {
+                let name = args.get(2).cloned().unwrap_or_default();
+                if name.is_empty() {
+                    println!("zя exclude add <имя процесса>");
+                    return Ok(());
+                }
+                let lower = name.to_lowercase();
+                if cfg
+                    .exclude_processes
+                    .iter()
+                    .any(|p| p.to_lowercase() == lower)
+                {
+                    println!("zя: {name} уже в исключениях");
+                } else {
+                    cfg.exclude_processes.push(name.clone());
+                    config::save(&cfg)?;
+                    println!("zя: исключён процесс {name}");
+                }
+            }
+            "add-dir" | "dir" | "folder" => {
+                let dir = args.get(2).cloned().unwrap_or_default();
+                if dir.is_empty() {
+                    println!("zя exclude add-dir <папка>");
+                    return Ok(());
+                }
+                let lower = dir.to_lowercase();
+                if cfg.exclude_dirs.iter().any(|d| d.to_lowercase() == lower) {
+                    println!("zя: {dir} уже в исключениях");
+                } else {
+                    cfg.exclude_dirs.push(dir.clone());
+                    config::save(&cfg)?;
+                    println!("zя: исключена папка {dir}");
+                }
+            }
+            "remove" | "del" | "delete" => {
+                let name = args.get(2).cloned().unwrap_or_default();
+                if name.is_empty() {
+                    println!("zя exclude remove <имя процесса>");
+                    return Ok(());
+                }
+                let lower = name.to_lowercase();
+                let before = cfg.exclude_processes.len();
+                cfg.exclude_processes.retain(|p| p.to_lowercase() != lower);
+                if cfg.exclude_processes.len() == before {
+                    println!("zя: {name} не найдено в исключениях");
+                } else {
+                    config::save(&cfg)?;
+                    println!("zя: процесс {name} больше не исключён");
+                }
+            }
+            "remove-dir" | "del-dir" => {
+                let dir = args.get(2).cloned().unwrap_or_default();
+                if dir.is_empty() {
+                    println!("zя exclude remove-dir <папка>");
+                    return Ok(());
+                }
+                let lower = dir.to_lowercase();
+                let before = cfg.exclude_dirs.len();
+                cfg.exclude_dirs.retain(|d| d.to_lowercase() != lower);
+                if cfg.exclude_dirs.len() == before {
+                    println!("zя: {dir} не найдено в исключениях");
+                } else {
+                    config::save(&cfg)?;
+                    println!("zя: папка {dir} больше не исключена");
+                }
+            }
+            "clear" => {
+                cfg.exclude_processes.clear();
+                cfg.exclude_dirs.clear();
+                config::save(&cfg)?;
+                println!("zя: исключения очищены");
+            }
+            _ => {
+                println!("процессы: {}", cfg.exclude_processes.join(", "));
+                println!("папки:   {}", cfg.exclude_dirs.join(", "));
+            }
         }
         return Ok(());
     }
