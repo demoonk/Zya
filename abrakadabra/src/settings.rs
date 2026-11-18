@@ -466,7 +466,7 @@ unsafe extern "system" fn target_mouse_hook(code: i32, wparam: WPARAM, lparam: L
             if mouse_ptr.is_null() {
                 return CallNextHookEx(None, code, wparam, lparam);
             }
-            let clicked = unsafe { (*mouse_ptr).hwnd };
+            let clicked = (*mouse_ptr).hwnd;
             let settings = get_handle(&WINDOW_HANDLE);
             if clicked != settings && !clicked.0.is_null() {
                 let name = crate::win::window_process_name(clicked);
@@ -640,7 +640,10 @@ unsafe extern "system" fn settings_wndproc(
                             .get(index)
                             .cloned();
                         if let Some(e) = entry {
-                            copy_to_clipboard(&format!("{} -> {}", e.original, e.converted));
+                            copy_to_clipboard(&format!(
+                                "{} {} -> {} ({})",
+                                e.time, e.original, e.converted, e.why
+                            ));
                             set_status(&format!("Скопировано: {} -> {}", e.original, e.converted));
                         }
                     }
@@ -872,7 +875,7 @@ fn pick_folder(parent: HWND) -> Option<String> {
         let library = LoadLibraryW(PCWSTR(library_name.as_ptr())).ok()?;
         let proc = GetProcAddress(library, PCSTR(b"GetOpenFolder\0".as_ptr()))?;
         type GetOpenFolderFn = unsafe extern "system" fn(HWND, u32, *mut *mut u16) -> i32;
-        let get_open_folder: GetOpenFolderFn = unsafe { std::mem::transmute(proc) };
+        let get_open_folder: GetOpenFolderFn = std::mem::transmute(proc);
 
         let mut path: *mut u16 = std::ptr::null_mut();
         if get_open_folder(parent, 0, &mut path) != 0 {

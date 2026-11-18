@@ -1512,29 +1512,6 @@ pub fn exclude_dirs() -> Vec<String> {
     app().lock().unwrap().cfg.exclude_dirs.clone()
 }
 
-/// Full executable path of the currently foreground window, or an empty string.
-pub fn foreground_process_path() -> String {
-    unsafe { foreground_process() }
-}
-
-/// Process/file name of the foreground application, e.g. "chrome.exe".
-pub fn foreground_process_name() -> String {
-    let path = foreground_process_path();
-    Path::new(&path)
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default()
-}
-
-/// Folder containing the foreground application, e.g. "c:\\program files\\app".
-pub fn foreground_process_dir() -> String {
-    let path = foreground_process_path();
-    Path::new(&path)
-        .parent()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default()
-}
-
 pub fn add_exclude_process(name: &str) -> bool {
     let name = name.trim();
     if name.is_empty() {
@@ -1594,17 +1571,6 @@ pub fn remove_exclude_dir(dir: &str) -> bool {
     true
 }
 
-pub fn clear_excludes() -> bool {
-    let mut a = app().lock().unwrap();
-    if a.cfg.exclude_processes.is_empty() && a.cfg.exclude_dirs.is_empty() {
-        return false;
-    }
-    a.cfg.exclude_processes.clear();
-    a.cfg.exclude_dirs.clear();
-    crate::config::save(&a.cfg).ok();
-    true
-}
-
 /// Process/file name of the application owning `hwnd`, e.g. "chrome.exe".
 pub fn window_process_name(hwnd: HWND) -> String {
     unsafe {
@@ -1657,6 +1623,22 @@ pub fn add_dictionary_word(word: &str) -> bool {
 
 pub fn dictionary_words() -> Vec<String> {
     app().lock().unwrap().cfg.whitelist.clone()
+}
+
+/// Remove a word from the user dictionary. Returns true when it was there.
+pub fn remove_dictionary_word(word: &str) -> bool {
+    let lower = word.trim().to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    let mut a = app().lock().unwrap();
+    let before = a.cfg.whitelist.len();
+    a.cfg.whitelist.retain(|w| !w.eq_ignore_ascii_case(&lower));
+    if a.cfg.whitelist.len() == before {
+        return false;
+    }
+    crate::config::save(&a.cfg).ok();
+    true
 }
 
 /// True when automatic correction is currently suppressed for the foreground

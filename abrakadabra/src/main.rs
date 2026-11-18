@@ -51,7 +51,9 @@ fn usage() {
            z.exe tgclear           очистить поле ввода Telegram\n\
            z.exe autostart on|off  запуск при входе в Windows (или install.ps1)\n\
           z.exe config            текущий конфигурационный JSON и его путь\n\
-          z.exe log               путь к журналу переключений\\n\\
+          z.exe log               путь к журналу переключений\n\
+           z.exe dict                слова словаря, которые движок не трогает\n\
+           z.exe log clear           очистить журнал переключений\n\
           z.exe settings          окно настроек: процессы, папки, лог переключений\n\
           z.exe techtest          восстановление всех терминов тех. словаря\n\
            z.exe corpus            точность движка на тексте собранных статей\n\
@@ -133,7 +135,49 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     if cmd == "log" {
+        if args.get(1).map(|s| s == "clear").unwrap_or(false) {
+            diary::clear_recent();
+            match std::fs::write(diary::path(), "") {
+                Ok(_) => println!("zя: журнал переключений очищен"),
+                Err(e) => println!("zя: не удалось очистить журнал: {e}"),
+            }
+            return Ok(());
+        }
         println!("{}", diary::path().display());
+        return Ok(());
+    }
+    if cmd == "dict" || cmd == "словарь" {
+        let sub = args.get(1).map(|s| s.as_str()).unwrap_or("list");
+        match sub {
+            "add" => {
+                let word = args.get(2).cloned().unwrap_or_default();
+                if word.is_empty() {
+                    println!("zя dict add <слово>");
+                    return Ok(());
+                }
+                if win::add_dictionary_word(&word) {
+                    println!("zя: {word} добавлено в словарь");
+                } else {
+                    println!("zя: {word} уже в словаре");
+                }
+            }
+            "remove" | "del" => {
+                let word = args.get(2).cloned().unwrap_or_default();
+                if win::remove_dictionary_word(&word) {
+                    println!("zя: {word} удалено из словаря");
+                } else {
+                    println!("zя: {word} не найдено в словаре");
+                }
+            }
+            _ => {
+                let words = win::dictionary_words();
+                if words.is_empty() {
+                    println!("zя: словарь пуст");
+                } else {
+                    println!("zя: словарь ({}): {}", words.len(), words.join(", "));
+                }
+            }
+        }
         return Ok(());
     }
     if cmd == "settings" || cmd == "настройки" {
