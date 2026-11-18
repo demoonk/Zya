@@ -16,7 +16,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
     DestroyMenu, DestroyWindow, GetCursorPos, PostMessageW, RegisterClassW, SetForegroundWindow,
-    ShowWindow, TrackPopupMenu, HICON, IMAGE_FLAGS, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING,
+    ShowWindow, TrackPopupMenu, HICON, IMAGE_FLAGS, MF_CHECKED, MF_STRING,
     SW_HIDE, TPM_LEFTALIGN, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_COMMAND, WM_DESTROY, WM_NULL,
     WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
@@ -24,14 +24,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 const WM_TRAYICON: u32 = 0x1111;
 const CMD_TOGGLE: usize = 1;
 const CMD_AUTOSTART: usize = 2;
-const CMD_DIARY: usize = 3;
-const CMD_CONFIG: usize = 4;
-const CMD_QUIT: usize = 5;
-const CMD_EXCLUDE_WINDOW: usize = 6;
-const CMD_EXCLUDE_DIR: usize = 7;
-const CMD_CLEAR_EXCLUDES: usize = 8;
-const CMD_REMOVE_PROCESS: usize = 9;
-const CMD_REMOVE_DIR: usize = 10;
+const CMD_SETTINGS: usize = 3;
+const CMD_QUIT: usize = 4;
 
 // Complete ICONREF blocks: BITMAPINFOHEADER + bottom-up 32bpp BGRA + 1bpp AND
 // mask. Handing CreateIcon a naked BGRA buffer produced a blue, vertically
@@ -142,7 +136,7 @@ unsafe fn show_menu(hwnd: HWND) {
         menu,
         if auto { MF_CHECKED } else { MF_STRING },
         CMD_TOGGLE,
-        PCWSTR(wide("Автоисправление раскладки").as_ptr()),
+        PCWSTR(wide("Автосправление раскладки").as_ptr()),
     );
     let _ = AppendMenuW(
         menu,
@@ -153,68 +147,9 @@ unsafe fn show_menu(hwnd: HWND) {
     let _ = AppendMenuW(
         menu,
         MF_STRING,
-        CMD_DIARY,
-        PCWSTR(wide("Последние переключения").as_ptr()),
+        CMD_SETTINGS,
+        PCWSTR(wide("Настройки").as_ptr()),
     );
-    let _ = AppendMenuW(
-        menu,
-        MF_STRING,
-        CMD_CONFIG,
-        PCWSTR(wide("Папка настроек").as_ptr()),
-    );
-    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR(std::ptr::null()));
-
-    let s_exclude_window = wide("Исключить активное окно");
-    let _ = AppendMenuW(
-        menu,
-        MF_STRING,
-        CMD_EXCLUDE_WINDOW,
-        PCWSTR(s_exclude_window.as_ptr()),
-    );
-    let s_exclude_dir = wide("Исключить папку активного окна");
-    let _ = AppendMenuW(
-        menu,
-        MF_STRING,
-        CMD_EXCLUDE_DIR,
-        PCWSTR(s_exclude_dir.as_ptr()),
-    );
-    let s_clear_excludes = wide("Сбросить исключения");
-    let _ = AppendMenuW(
-        menu,
-        MF_STRING,
-        CMD_CLEAR_EXCLUDES,
-        PCWSTR(s_clear_excludes.as_ptr()),
-    );
-
-    let sub = match CreatePopupMenu() {
-        Ok(m) => m,
-        Err(_) => menu,
-    };
-    let processes = crate::win::exclude_processes();
-    let directories = crate::win::exclude_dirs();
-    if processes.is_empty() && directories.is_empty() {
-        let s_none = wide("Нет исключений");
-        let _ = AppendMenuW(sub, MF_STRING, 0, PCWSTR(s_none.as_ptr()));
-    } else {
-        for (i, process) in processes.iter().enumerate() {
-            let label = wide(&format!("Удалить: {process}"));
-            let id = ((i + 1) << 8) | CMD_REMOVE_PROCESS;
-            let _ = AppendMenuW(sub, MF_STRING, id, PCWSTR(label.as_ptr()));
-        }
-        for (i, dir) in directories.iter().enumerate() {
-            let label = wide(&format!("Удалить: {dir}"));
-            let id = ((i + 1) << 8) | CMD_REMOVE_DIR;
-            let _ = AppendMenuW(sub, MF_STRING, id, PCWSTR(label.as_ptr()));
-        }
-    }
-    let s_excludes = wide("Исключения");
-    let _ = AppendMenuW(
-        menu,
-        MF_POPUP,
-        sub.0 as usize,
-        PCWSTR(s_excludes.as_ptr()),
-    );
-
     let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT, PCWSTR(wide("Выход").as_ptr()));
     // The icon sits at the right end of the taskbar: open the menu above the
     // bar, aligned to the cursor.
@@ -230,41 +165,13 @@ unsafe fn show_menu(hwnd: HWND) {
     // The menu must be dismissed explicitly, otherwise the foreground window
     // stays captured by our hidden window and the next click does nothing.
     let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
-    if sub.0 != menu.0 {
-        let _ = DestroyMenu(sub);
-    }
     let _ = DestroyMenu(menu);
-}
-
-/// Open a file or folder with the shell default handler (Explorer).
-fn open_with_shell(path: &str) {
-    let _ = std::process::Command::new("explorer.exe").arg(path).spawn();
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_COMMAND => {
             let cmd = wparam.0 & 0xFFFF;
-            if cmd >= 256 {
-                let kind = cmd & 0xFF;
-                let index = (cmd >> 8) - 1;
-                match kind {
-                    CMD_REMOVE_PROCESS => {
-                        let list = crate::win::exclude_processes();
-                        if let Some(name) = list.get(index) {
-                            crate::win::remove_exclude_process(name);
-                        }
-                    }
-                    CMD_REMOVE_DIR => {
-                        let list = crate::win::exclude_dirs();
-                        if let Some(dir) = list.get(index) {
-                            crate::win::remove_exclude_dir(dir);
-                        }
-                    }
-                    _ => {}
-                }
-                return LRESULT(0);
-            }
             match cmd {
                 CMD_TOGGLE => {
                     crate::win::toggle_auto();
@@ -273,42 +180,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     let exe = crate::autostart::toggle();
                     println!("zя: автозапуск {}", exe);
                 }
-                CMD_DIARY => {
-                    let path = crate::diary::path();
-                    println!("дневник: {}", path.display());
-                    open_with_shell(&path.display().to_string());
-                }
-                CMD_CONFIG => {
-                    let dir = crate::config::config_dir();
-                    println!("конфиг: {}", dir.display());
-                    open_with_shell(&dir.display().to_string());
-                }
-                CMD_EXCLUDE_WINDOW => {
-                    let name = crate::win::foreground_process_name();
-                    if name.is_empty() {
-                        println!("zя: не удалось определить активное окно");
-                    } else if crate::win::add_exclude_process(&name) {
-                        println!("zя: процесс {name} добавлен в исключения");
-                    } else {
-                        println!("zя: процесс {name} уже исключён");
-                    }
-                }
-                CMD_EXCLUDE_DIR => {
-                    let dir = crate::win::foreground_process_dir();
-                    if dir.is_empty() {
-                        println!("zя: не удалось определить папку активного окна");
-                    } else if crate::win::add_exclude_dir(&dir) {
-                        println!("zя: папка {dir} добавлена в исключения");
-                    } else {
-                        println!("zя: папка {dir} уже исключена");
-                    }
-                }
-                CMD_CLEAR_EXCLUDES => {
-                    if crate::win::clear_excludes() {
-                        println!("zя: исключения очищены");
-                    } else {
-                        println!("zя: исключений не было");
-                    }
+                CMD_SETTINGS => {
+                    crate::settings::open();
                 }
                 CMD_QUIT => {
                     detach(hwnd);

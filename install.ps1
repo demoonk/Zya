@@ -1,5 +1,8 @@
 # One-line install:
 # powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/demoonk/Zya/main/install.ps1 | iex"
+#
+# The installer requires administrator rights. It downloads the GitHub asset z.exe
+# and installs the local resident app as %APPDATA%\zя\zя.exe.
 
 param(
     [switch]$NoStart,
@@ -10,10 +13,27 @@ $ErrorActionPreference = 'Stop'
 
 $Repo = 'demoonk/Zya'
 $AppDir = Join-Path $env:APPDATA 'zя'
-$AppExe = Join-Path $AppDir 'z.exe'
+$AppExe = Join-Path $AppDir 'zя.exe'
 $ConfigFile = Join-Path $AppDir 'config.json'
 $LogFile = Join-Path $AppDir 'diario.log'
 $ReleaseUrl = "https://github.com/$Repo/releases/latest/download/z.exe"
+$RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+
+function Test-IsAdmin {
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = [Security.Principal.WindowsPrincipal] $identity
+        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch {
+        return $false
+    }
+}
+
+if (-not (Test-IsAdmin)) {
+    Write-Host 'Необходимо запустить установку от имени администратора.'
+    Write-Host 'Правый клик -> "Запуск от имени администратора", или powershell -RunAs admin.'
+    exit 1
+}
 
 function Download-App([string] $url, [string] $destination) {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
@@ -37,42 +57,81 @@ function Download-App([string] $url, [string] $destination) {
     return $false
 }
 
-$puntoProcesses = Get-Process | Where-Object { $_.Name -match 'punto|puntoswitcher' }
+function Kill-OldProcesses {
+    $oldNames = @(
+        'z',
+        'z.exe',
+        'zя',
+        'zя.exe',
+        'z_app',
+        'z_app.exe',
+        'abrakadabra',
+        'abracadabra',
+        'puntoswitcher',
+        'punto_switcher',
+        'keyswitcher',
+        'layoutswitcher'
+    )
 
-if ($puntoProcesses.Count -gt 0) {
-    Write-Host 'Punto Switcher is running:'
-    foreach ($p in $puntoProcesses) {
-        Write-Host "  $($p.Name) PID $($p.Id)"
-    }
-
-    if ($StopPunto) {
-        foreach ($p in $puntoProcesses) {
+    foreach ($name in $oldNames) {
+        Get-Process -Name $name -ErrorAction SilentlyContinue | ForEach-Object {
             try {
-                Stop-Process -Id $p.Id -Force
+                Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
             } catch {
-                Write-Host "Could not stop $($p.Name): $($_.Exception.Message)"
             }
         }
-        Write-Host 'Punto Switcher was stopped.'
-    } else {
-        Write-Host 'ZЯ can conflict with Punto Switcher. Run with -StopPunto to close it automatically.'
     }
+
+    $puntoProcesses = Get-Process | Where-Object { $_.Name -match 'punto|puntoswitcher' }
+    if ($puntoProcesses.Count -gt 0 -or $StopPunto) {
+        foreach ($p in $puntoProcesses) {
+            try {
+                Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            } catch {
+            }
+        }
+    }
+
+    Get-Process |
+        Where-Object { $_.Path -and $_.Path.StartsWith($AppDir, [System.StringComparison]::OrdinalIgnoreCase) } |
+        ForEach-Object {
+            try {
+                Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+            } catch {
+            }
+        }
 }
 
-New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
+function Remove-OldAutostart {
+    if (-not (Test-Path $RunKey)) {
+        return
+    }
 
-Get-Process |
-    Where-Object {
-        $_.Path -and (
-            $_.Path -like "$AppDir*"
-        )
-    } |
-    ForEach-Object {
+    $oldValues = @(
+        'z.exe',
+        'zя',
+        'zya',
+        'z',
+        'Abrakadabra',
+        'abracadabra',
+        'puntoswitcher',
+        'Punto Switcher',
+        'keyswitcher',
+        'layoutswitcher'
+    )
+
+    foreach ($value in $oldValues) {
         try {
-            Stop-Process -Id $_.Id -Force
+            Remove-ItemProperty -LiteralPath $RunKey -Name $value -ErrorAction SilentlyContinue
         } catch {
         }
     }
+}
+
+Kill-OldProcesses
+Remove-OldAutostart
+
+New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
 
 if (-not (Download-App $ReleaseUrl $AppExe)) {
     throw "Could not download $ReleaseUrl"
@@ -109,21 +168,27 @@ if (-not (Test-Path -LiteralPath $LogFile)) {
     Set-Content -LiteralPath $LogFile -Value '' -Encoding UTF8
 }
 
+try {
+    New-ItemProperty -LiteralPath $RunKey -Name 'zя.exe' -PropertyType String -Value "`"$AppExe`" run headless" -Force | Out-Null
+} catch {
+    Write-Host "Не удалось добавить автозапуск: $($_.Exception.Message)"
+}
+
 if (-not $NoStart) {
     $stdoutFile = Join-Path $AppDir 'start_stdout.log'
     $stderrFile = Join-Path $AppDir 'start_stderr.log'
 
     try {
-        $proc = Start-Process -FilePath $AppExe -WindowStyle Hidden -PassThru `
+        $proc = Start-Process -FilePath $AppExe -ArgumentList 'run', 'headless' -WindowStyle Hidden -PassThru `
             -RedirectStandardOutput $stdoutFile `
             -RedirectStandardError $stderrFile
 
         Start-Sleep -Seconds 3
 
         if (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue) {
-            Write-Host 'z.exe запущен: значок RU/EN должен появиться в трее.'
+            Write-Host 'zя.exe запущен: значок RU/EN должен появиться в трее.'
         } else {
-            Write-Host 'z.exe не запустился как resident app. Проверьте:'
+            Write-Host 'zя.exe не запустился как resident app. Проверьте:'
             if (Test-Path -LiteralPath $stderrFile) {
                 Get-Content -LiteralPath $stderrFile -TotalCount 20
             }
@@ -137,8 +202,9 @@ if (-not $NoStart) {
 
 Write-Host ''
 Write-Host 'zя installed.'
-Write-Host "App file: $AppExe"
+Write-Host "GitHub asset: z.exe"
+Write-Host "Installed app: $AppExe"
 Write-Host "Settings folder: $AppDir"
+Write-Host 'Menu: Автосправление раскладки, Автозапуск при входе, Настройки, Выход'
 Write-Host 'Hotkeys: Break, Ctrl+Break, Shift+Break, Ctrl+Alt+P'
-Write-Host 'Menu: Исключить активное окно / Исключить папку активного окна / Исключения'
 Write-Host 'Uninstall: Uninstall.ps1'

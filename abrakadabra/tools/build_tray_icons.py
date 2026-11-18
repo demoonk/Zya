@@ -43,7 +43,7 @@ def draw_text(text, filled):
     canvas = Image.new("RGBA", (220, 220), (0, 0, 0, 0))
     d = ImageDraw.Draw(canvas)
 
-    stroke_width = 3 if filled else 5
+    stroke_width = 2 if filled else 2
     text_pos = (10, 10)
 
     # Draw the layout code once, then add a thin outline for readability on both
@@ -71,19 +71,14 @@ def draw_text(text, filled):
     glyph_box = Image.alpha_composite(canvas, Image.new("RGBA", canvas.size, (0, 0, 0, 0))).crop(bbox)
 
     w, h = glyph_box.size
-    max_target = target - 1
     if w <= 0 or h <= 0:
         return glyph_box.resize((target, target), Image.LANCZOS)
 
-    # The text should be as tall as possible. Width may become narrower than the
-    # square target, so the icon keeps the maximum readable glyph height.
-    scale = min(max_target / w, max_target / h)
-    new_w = max(1, int(w * scale))
-    new_h = max(1, int(h * scale))
-    scaled = glyph_box.resize((new_w, new_h), Image.LANCZOS)
-
+    # Stretch the cropped glyph to the full 32x32 canvas: maximum possible
+    # height and maximum possible width.
+    scaled = glyph_box.resize((target, target), Image.LANCZOS)
     out = Image.new("RGBA", (target, target), (0, 0, 0, 0))
-    out.paste(scaled, ((target - new_w) // 2, (target - new_h) // 2))
+    out.paste(scaled, (0, 0))
     return out
 
 

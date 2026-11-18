@@ -7,6 +7,7 @@ mod layout;
 mod model;
 mod probe;
 mod sanity;
+mod settings;
 mod sim;
 mod tg;
 mod tray;
@@ -50,15 +51,16 @@ fn usage() {
            z.exe tgclear           очистить поле ввода Telegram\n\
            z.exe autostart on|off  запуск при входе в Windows (или install.ps1)\n\
           z.exe config            текущий конфигурационный JSON и его путь\n\
-          z.exe log               путь к журналу переключений\n\
+          z.exe log               путь к журналу переключений\\n\\
+          z.exe settings          окно настроек: процессы, папки, лог переключений\n\
           z.exe techtest          восстановление всех терминов тех. словаря\n\
            z.exe corpus            точность движка на тексте собранных статей\n\
            z.exe help              эта справка\n\
         \n\
         значок в трее: RU или EN показывает раскладку,\n\
         белый текст RU/EN — автоисправление работает, контурный — выключено.\n\
-        левый клик — включить/выключить, правый — меню (автоисправление, автозапуск,\n\
-        последние переключения, папка настроек, выход).\n\
+        левый клик — включить/выключить, правый — меню: Автосправление раскладки,\n\
+        Автозапуск при входе, Настройки, Выход. Настройки — окно с вкладками: Процессы, Папка, Лог переключений.\n\
         \n\
         хоткеи настраиваются в config.json:\n\
           Alt          — отменить последнее исправление\n\
@@ -79,8 +81,8 @@ fn usage() {
         exclude list                   показать исключения\n\
         exclude clear                  сбросить исключения\n\
         автозапуск: autostart в config.json или меню значка в трее.\n\
-        меню значка: \"Исключить активное окно\", \"Исключить папку активного окна\",\n\
-        \"Исключения\" — список и удаление.\n\
+        меню значка: \"Автосправление раскладки\", \"Автозапуск при входе\", \"Настройки\", \"Выход\".\n\
+        Настройки открывают окна: Процессы, Папка, Лог переключений.\n\
         \n\
         переменные окружения:\n\
           ZYA_VERBOSE=1   подробный вывод решений в консоль\n"
@@ -134,6 +136,10 @@ fn main() -> anyhow::Result<()> {
         println!("{}", diary::path().display());
         return Ok(());
     }
+    if cmd == "settings" || cmd == "настройки" {
+        settings::open_blocking();
+        return Ok(());
+    }
     if cmd == "autostart" {
         let exe = std::env::current_exe()?;
         let on = args.get(1).map(|s| s == "on").unwrap_or(true);
@@ -157,7 +163,7 @@ fn main() -> anyhow::Result<()> {
         let exe = std::env::current_exe()?;
         let dir = config::config_dir();
         std::fs::create_dir_all(&dir)?;
-        let dest = dir.join("z.exe");
+        let dest = dir.join("zя.exe");
         std::fs::copy(&exe, &dest)?;
         println!("zя: скопирован в {}", dest.display());
         if args.get(1).map(|s| s == "off").unwrap_or(false) {
@@ -166,8 +172,8 @@ fn main() -> anyhow::Result<()> {
             println!("zя: автозапуск не включён");
         } else if set_autostart(&dest.display().to_string(), true) {
             write_autostart_flag(true);
-            println!("zя: автозапуск включён (Run\\zя → {})", dest.display());
-            println!("запустить сейчас: z.exe run");
+            println!("zя: автозапуск включён (Run\\zя.exe → {})", dest.display());
+            println!("запустить сейчас: {} run", dest.display());
         } else {
             println!("zя: не удалось зарегистрировать автозапуск");
         }
@@ -272,6 +278,14 @@ fn main() -> anyhow::Result<()> {
                 autostart::sync_with_config(cfg.autostart);
             }
             startup_log("zя: запуск рабочего режима");
+
+            // Two resident copies would hook the keyboard twice and rewrite the
+            // same word twice — the "double switch" the user keeps noticing.
+            if win::another_instance_running() {
+                startup_log("zя: другой экземпляр уже работает, второй запуск пропущен");
+                println!("zя: уже запущен другой экземпляр — этот закрыт.");
+                return Ok(());
+            }
 
             let hook_ok = match win::install_hook() {
                 Ok(_) => {

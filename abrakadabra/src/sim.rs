@@ -802,6 +802,28 @@ mod tests {
     }
 
     #[test]
+    fn mixed_harness_text_is_not_fixed_twice() {
+        // The sentence the user actually types into the chat: Russian words with
+        // Latin abbreviations and `!`, `,`, `.` mixed in.
+        let e = engine();
+        let want = "задавай вопросы по компам, выбору железа и сборкам. можно даже по серверам. кидать сборку на оценку. стрим идёт на YT, VK и Twitch!";
+        let mut sim = Sim::new(true);
+        sim.press_text(&e, &keys_of(want));
+
+        let mut seen = std::collections::HashSet::new();
+        for (token, _) in &sim.log {
+            assert!(
+                seen.insert(token.clone()),
+                "token {token} was rewritten twice in one run"
+            );
+        }
+        println!("mixed out: {}", sim.out);
+        for (a, b) in &sim.log {
+            println!("  switch: {a} -> {b}");
+        }
+    }
+
+    #[test]
     fn article_round_trip_is_reproducible() {
         let e = engine();
         let typed = std::fs::read_to_string("data/article_typed.txt").unwrap();

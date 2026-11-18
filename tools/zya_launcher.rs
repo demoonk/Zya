@@ -1,13 +1,40 @@
-// One-file ZЯ app: `z.exe`.
+// One-file ZЯ installer/launcher: `z.exe`.
 //
-// Running it with no parameters starts the working mode.
-// It creates/updates the installed app in the user Roaming folder:
-//   C:\Users\USER\AppData\Roaming\zя\z.exe
-// and creates settings files there if they are missing.
-// The executable asks Windows to launch it as administrator.
-
+// Running it as administrator:
+//   - creates C:\Users\USER\AppData\Roaming\zя\
+//   - writes the real local app as zя.exe
+//   - creates config.json and diario.log if missing
+//   - removes old autostart entries and stops old switchers/old z.exe copies
+//   - starts zя.exe run headless
+//   - shows a success/error window
+//
+// The GitHub release asset must remain the ASCII file `z.exe`.
 use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+};
+use windows::Win32::System::Threading::{
+    GetCurrentProcessId, OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+};
 use windows::Win32::UI::Shell::IsUserAnAdmin;
+
+#[link(name = "user32")]
+extern "system" {
+    fn MessageBoxW(
+        hwnd: *mut std::ffi::c_void,
+        text: *const u16,
+        caption: *const u16,
+        flags: u32,
+    ) -> i32;
+}
+
+const MB_ICONERROR: u32 = 0x0010;
+const MB_ICONINFORMATION: u32 = 0x0040;
 
 const APP: &[u8] = include_bytes!("z.bin");
 
@@ -34,15 +61,30 @@ const DEFAULT_CONFIG: &str = r#"{
 "#;
 
 const RUN_KEY: &str = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-const RUN_VALUE: &str = "z.exe";
-const OLD_RUN_VALUE: &str = "zя";
+const RUN_VALUE: &str = "zя.exe";
+const OLD_RUN_VALUES: &[&str] = &["z.exe", "zя", "zya", "z", "Abrakadabra", "abracadabra"];
+const OLD_PROCESS_NAMES: &[&str] = &[
+    "z.exe",
+    "zя.exe",
+    "z_app.exe",
+    "abrakadabra.exe",
+    "abracadabra.exe",
+    "puntoswitcher.exe",
+    "punto_switcher.exe",
+    "keyswitcher.exe",
+    "layoutswitcher.exe",
+];
 
-fn app_data_dir() -> std::path::PathBuf {
+fn app_data_dir() -> PathBuf {
     let base = match std::env::var("APPDATA") {
-        Ok(v) => std::path::PathBuf::from(v),
-        Err(_) => std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        Ok(v) => PathBuf::from(v),
+        Err(_) => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     };
     base.join("zя")
+}
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 fn config_wants_autostart(config: &str) -> bool {
@@ -50,10 +92,10 @@ fn config_wants_autostart(config: &str) -> bool {
 }
 
 fn run_reg(args: &[&str]) -> bool {
-    match std::process::Command::new("reg")
+    match Command::new("reg")
         .args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
     {
         Ok(status) => status.success(),
@@ -61,12 +103,16 @@ fn run_reg(args: &[&str]) -> bool {
     }
 }
 
-fn ensure_autostart(installed_path: &str) -> bool {
-    // Remove the old Cyrillic autostart entry if it still exists.
-    if run_reg(&["query", RUN_KEY, "/v", OLD_RUN_VALUE]) {
-        run_reg(&["delete", RUN_KEY, "/v", OLD_RUN_VALUE, "/f"]);
+fn remove_old_run_entries() {
+    for value in OLD_RUN_VALUES {
+        if run_reg(&["query", RUN_KEY, "/v", value]) {
+            run_reg(&["delete", RUN_KEY, "/v", value, "/f"]);
+        }
     }
+}
 
+fn ensure_autostart(installed_path: &str) -> bool {
+    remove_old_run_entries();
     if !run_reg(&["query", RUN_KEY, "/v", RUN_VALUE]) {
         run_reg(&[
             "add",
@@ -84,7 +130,55 @@ fn ensure_autostart(installed_path: &str) -> bool {
     }
 }
 
-fn append_startup_log(dir: &std::path::Path, msg: &str) {
+fn process_entry_name(entry: &PROCESSENTRY32W) -> String {
+    String::from_utf16_lossy(&entry.szExeFile)
+        .split('\0')
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn is_old_process(name: &str, pid: u32) -> bool {
+    if pid == unsafe { GetCurrentProcessId() } {
+        return false;
+    }
+    let lower = name.to_lowercase();
+    OLD_PROCESS_NAMES
+        .iter()
+        .any(|candidate| lower == candidate.to_lowercase())
+}
+
+fn kill_old_processes() {
+    unsafe {
+        let snapshot = match CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
+            Ok(handle) => handle,
+            Err(_) => return,
+        };
+
+        let mut entry = PROCESSENTRY32W::default();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+
+        if Process32FirstW(snapshot, &mut entry).is_ok() {
+            loop {
+                let pid = entry.th32ProcessID;
+                let name = process_entry_name(&entry);
+                if is_old_process(&name, pid) {
+                    if let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, pid) {
+                        let _ = TerminateProcess(handle, 0);
+                        let _ = CloseHandle(handle);
+                    }
+                }
+                if Process32NextW(snapshot, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+
+        let _ = CloseHandle(snapshot);
+    }
+}
+
+fn append_startup_log(dir: &Path, msg: &str) {
     let path = dir.join("startup.log");
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -100,36 +194,43 @@ fn append_startup_log(dir: &std::path::Path, msg: &str) {
     }
 }
 
+fn message(title: &str, text: &str, flags: u32) {
+    let t = wide(title);
+    let m = wide(text);
+    unsafe {
+        MessageBoxW(std::ptr::null_mut(), m.as_ptr(), t.as_ptr(), flags);
+    }
+}
+
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if !unsafe { IsUserAnAdmin() }.as_bool() {
+        message(
+            "Требуются права администратора",
+            "z.exe должен запускаться с правами администратора.\nЗапустите его от имени администратора.",
+            MB_ICONERROR,
+        );
         eprintln!("z.exe must be launched as administrator. Run it with administrator rights.");
         std::process::exit(1);
     }
 
     let dir = app_data_dir();
 
-    match std::fs::create_dir_all(&dir) {
-        Ok(_) => append_startup_log(&dir, "z.exe launcher: запуск"),
-        Err(e) => {
-            eprintln!("z.exe launcher error: cannot create {} : {}", dir.display(), e);
-            return Err(e);
-        }
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        message(
+            "Ошибка установки zя",
+            &format!("Не удалось создать папку {} : {}", dir.display(), e),
+            MB_ICONERROR,
+        );
+        eprintln!("z.exe launcher error: cannot create {} : {}", dir.display(), e);
+        return Err(e);
     }
 
-    let installed_path = dir.join("z.exe");
-    let current_path = std::env::current_exe().unwrap_or_else(|_| installed_path.clone());
+    kill_old_processes();
+    remove_old_run_entries();
 
-    // If this exe was launched from another folder, overwrite the installed
-    // one-file app with this copy. If the copy fails, the embedded app is still
-    // extracted and run from the cache.
-    if current_path != installed_path {
-        match std::fs::copy(&current_path, &installed_path) {
-            Ok(_) => append_startup_log(&dir, "z.exe launcher: обновил z.exe в AppData"),
-            Err(e) => append_startup_log(&dir, &format!("z.exe launcher: не смог обновить z.exe: {e}")),
-        }
-    }
+    let installed_path = dir.join("zя.exe");
 
     let config_path = dir.join("config.json");
     let config_text = match std::fs::read_to_string(&config_path) {
@@ -138,11 +239,10 @@ fn main() -> std::io::Result<()> {
             match std::fs::write(&config_path, DEFAULT_CONFIG) {
                 Ok(_) => DEFAULT_CONFIG.to_string(),
                 Err(e) => {
-                    eprintln!(
-                        "z.exe launcher error: cannot write {} after read error {} : {}",
-                        config_path.display(),
-                        read_err,
-                        e
+                    message(
+                        "Ошибка установки zя",
+                        &format!("Не удалось создать config.json: {e}\nОшибка чтения: {read_err}"),
+                        MB_ICONERROR,
                     );
                     return Err(e);
                 }
@@ -152,38 +252,89 @@ fn main() -> std::io::Result<()> {
 
     let diary_path = dir.join("diario.log");
     if !diary_path.exists() {
-        match std::fs::write(&diary_path, "") {
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("z.exe launcher error: cannot write {} : {}", diary_path.display(), e);
-                return Err(e);
-            }
+        if let Err(e) = std::fs::write(&diary_path, "") {
+            message(
+                "Ошибка установки zя",
+                &format!("Не удалось создать diario.log: {e}"),
+                MB_ICONERROR,
+            );
+            return Err(e);
         }
     }
 
+    if let Err(e) = std::fs::write(&installed_path, APP) {
+        message(
+            "Ошибка установки zя",
+            &format!("Не удалось записать {}: {e}", installed_path.display()),
+            MB_ICONERROR,
+        );
+        return Err(e);
+    }
+
+    append_startup_log(&dir, "z.exe launcher: installed zя.exe");
+
     if std::env::var("ZYA_NO_AUTOSTART").is_err() && config_wants_autostart(&config_text) {
-        ensure_autostart(&installed_path.display().to_string());
+        if !ensure_autostart(&installed_path.display().to_string()) {
+            append_startup_log(&dir, "z.exe launcher: не удалось зарегистрировать автозапуск");
+        }
     }
 
-    // Extract the embedded application binary from this single exe and run it.
-    let cache_dir = dir.join(".cache");
-    if let Err(e) = std::fs::create_dir_all(&cache_dir) {
-        eprintln!("z.exe launcher error: cannot create {} : {}", cache_dir.display(), e);
-        return Err(e);
-    }
-    let app_path = cache_dir.join("z_app.exe");
-    if let Err(e) = std::fs::write(&app_path, APP) {
-        eprintln!("z.exe launcher error: cannot write {} : {}", app_path.display(), e);
-        return Err(e);
-    }
-
-    let mut cmd = std::process::Command::new(&app_path);
+    let mut cmd = Command::new(&installed_path);
     if args.is_empty() {
         cmd.args(["run", "headless"]);
     } else {
         cmd.args(args);
     }
 
-    let status = cmd.status()?;
-    std::process::exit(status.code().unwrap_or(1));
+    match cmd.spawn() {
+        Ok(mut child) => {
+            std::thread::sleep(Duration::from_secs(1));
+            match child.try_wait()? {
+                Some(status) if status.success() => {
+                    message(
+                        "Установлено",
+                        &format!(
+                            "zя установлен и запущен.\nФайл: {}\nПапка: {}",
+                            installed_path.display(),
+                            dir.display()
+                        ),
+                        MB_ICONINFORMATION,
+                    );
+                }
+                Some(status) => {
+                    message(
+                        "Ошибка запуска zя",
+                        &format!(
+                            "zя.exe завершился с кодом {}\nПроверьте папку: {}",
+                            status.code().unwrap_or(1),
+                            dir.display()
+                        ),
+                        MB_ICONERROR,
+                    );
+                    std::process::exit(status.code().unwrap_or(1));
+                }
+                None => {
+                    message(
+                        "Установлено",
+                        &format!(
+                            "zя установлен и работает в фоне.\nФайл: {}\nПапка: {}",
+                            installed_path.display(),
+                            dir.display()
+                        ),
+                        MB_ICONINFORMATION,
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            message(
+                "Ошибка запуска zя",
+                &format!("Не удалось запустить {}: {e}", installed_path.display()),
+                MB_ICONERROR,
+            );
+            return Err(e);
+        }
+    }
+
+    Ok(())
 }

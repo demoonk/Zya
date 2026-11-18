@@ -5,9 +5,13 @@
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HGLOBAL, LPARAM, LRESULT, WPARAM};
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::{
+    CloseHandle, ERROR_ALREADY_EXISTS, HANDLE, HGLOBAL, HWND, GetLastError, LPARAM, LRESULT, WPARAM,
+};
 use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    CreateMutexW, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyboardLayout, GetKeyboardLayoutList, SendInput, ToUnicodeEx, HKL, INPUT,
@@ -1355,6 +1359,19 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     CallNextHookEx(None, code, wparam, lparam)
 }
 
+/// True when another copy of zя is already resident. Two instances would both
+/// hook the keyboard and rewrite the same word twice — the classic cause of
+/// "double switches". The named mutex lives for the whole process.
+pub fn another_instance_running() -> bool {
+    unsafe {
+        let name: Vec<u16> = "Global\\ZyaLayoutGuard\0".encode_utf16().collect();
+        match CreateMutexW(None, true, PCWSTR(name.as_ptr())) {
+            Ok(_handle) => GetLastError() == ERROR_ALREADY_EXISTS,
+            Err(_) => false,
+        }
+    }
+}
+
 pub fn install_hook() -> anyhow::Result<()> {
     unsafe {
         let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0)?;
@@ -1588,6 +1605,60 @@ pub fn clear_excludes() -> bool {
     true
 }
 
+/// Process/file name of the application owning `hwnd`, e.g. "chrome.exe".
+pub fn window_process_name(hwnd: HWND) -> String {
+    unsafe {
+        if hwnd.0.is_null() {
+            return String::new();
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == 0 {
+            return String::new();
+        }
+        let handle = match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+            Ok(h) => h,
+            Err(_) => return String::new(),
+        };
+        let mut buf = vec![0u16; 1024];
+        let mut len = 1024u32;
+        let name = match QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        ) {
+            Ok(()) => String::from_utf16_lossy(&buf[..len as usize]),
+            Err(_) => String::new(),
+        };
+        let _ = CloseHandle(handle);
+        Path::new(&name)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default()
+    }
+}
+
+/// Add a word to the user dictionary (whitelist), so the hook no longer changes it.
+pub fn add_dictionary_word(word: &str) -> bool {
+    let letters: String = word.chars().filter(|c| c.is_alphabetic()).collect();
+    if letters.is_empty() {
+        return false;
+    }
+    let lower = letters.to_lowercase();
+    let mut a = app().lock().unwrap();
+    if a.cfg.whitelist.iter().any(|w| w.eq_ignore_ascii_case(&lower)) {
+        return false;
+    }
+    a.cfg.whitelist.push(letters);
+    crate::config::save(&a.cfg).ok();
+    true
+}
+
+pub fn dictionary_words() -> Vec<String> {
+    app().lock().unwrap().cfg.whitelist.clone()
+}
+
 /// True when automatic correction is currently suppressed for the foreground
 /// window (secret field, excluded process or excluded folder).
 pub fn context_blocked_now() -> bool {
@@ -1609,6 +1680,16 @@ pub fn hide_console() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn single_instance_guard_detects_a_second_copy() {
+        // The first call creates the named mutex, the second one finds it: this
+        // is exactly how two resident copies would have double-hooked the keyboard.
+        let first = another_instance_running();
+        let second = another_instance_running();
+        assert!(!first, "the first copy must see no other instance");
+        assert!(second, "a second copy must be rejected");
+    }
 
     #[test]
     fn break_hotkey_tolerates_synthetic_ctrl() {
