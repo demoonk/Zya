@@ -22,13 +22,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubus
 
 Установщик работает так:
 
-1. Ищет уже собранный `zя.exe` или `zya.exe` в `abrakadabra/target/release` или `abrakadabra/target/debug`.
-2. Если его нет, скачивает один self-contained файл с GitHub Releases (сейчас v0.1.1, asset `z.exe`; внутри embedded-бинарь с крупными иконками).
-3. Проверяет, запущен ли Punto Switcher.
-4. Кладет приложение в `%APPDATA%\zя\zя.exe`.
-5. Создает `%APPDATA%\zя\config.json` и `diario.log`, если их нет.
-6. Останавливает старую копию программы, если она уже запущена.
-7. Запускает `zя.exe` без параметров, то есть в рабочем режиме.
+1. Скачивает один self-contained файл с GitHub Releases: release asset называется `z.exe`, локально он сохраняется как `zя.exe`.
+2. Проверяет, запущен ли Punto Switcher.
+3. Кладет приложение в `%APPDATA%\zя\zя.exe`.
+4. Создает `%APPDATA%\zя\config.json` и `diario.log`, если их нет.
+5. Останавливает старую копию программы, если она уже запущена.
+6. Запускает `zя.exe` без параметров, то есть в рабочем режиме.
 
 ## Punto Switcher
 
@@ -38,55 +37,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubus
 .\install.ps1 -StopPunto
 ```
 
-## Установка с новой сборкой
-
-Если вы изменили исходный код:
-
-```powershell
-.\install.ps1 -Build
-```
-
-При сборке установщик может автоматически:
-
-- установить Rust через `rustup-init.exe`;
-- скачать Visual Studio Build Tools;
-- установить workload **C++ build tools**.
-
-Если скачивание Rust не удалось, Rust можно установить вручную:
-
-```powershell
-winget install Rust.Rust
-```
-
-Если нет `link.exe`:
-
-```powershell
-winget install Microsoft.VisualStudio.2022.BuildTools
-```
-
-Во время установки выбрать workload: `C++ build tools`.
-
 ## Запуск без параметров
 
 После установки можно запустить:
 
 ```powershell
-zya.exe
+zя.exe
 ```
 
-или просто двойной клик по `zya.exe`. Без параметров приложение сразу работает: ставится клавиатурный хук и появляется значок в трее.
+или просто двойной клик по `zя.exe`. Без параметров приложение сразу работает как `run headless`: ставится клавиатурный хук и появляется значок в трее.
 
 ## Полезные ключи
 
 ```powershell
-.\install.ps1 -DryRun
+.\install.ps1 -NoStart
 ```
-Проверяет, что будет установлено, ничего не меняет.
-
-```powershell
-.\install.ps1 -NoDownload
-```
-Не скачивает release, использует только локальную сборку.
+Установить, но не запускать.
 
 ```powershell
 .\install.ps1 -StopPunto
@@ -99,9 +65,22 @@ zya.exe
 
 - прозрачный фон;
 - белый текст;
-- крупная буква `Я`/`A` по максимуму высоты;
-- сплошная буква: автопереключение включено;
-- контурная буква: автопереключение выключено.
+- крупная буква `Я`/`Z` на всю высоту 32×32 px.
+
+В меню значка есть:
+
+- `Исключить активное окно`;
+- `Исключить папку активного окна`;
+- `Исключения` — список и удаление;
+- `Сбросить исключения`.
+
+Из командной строки:
+
+```powershell
+zя.exe exclude add chrome.exe
+zя.exe exclude add-dir C:\Games
+zя.exe exclude list
+```
 
 ## Удаление
 
