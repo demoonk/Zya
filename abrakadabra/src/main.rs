@@ -12,6 +12,8 @@ mod tg;
 mod tray;
 mod win;
 
+use std::io::Write;
+
 use engine::Engine;
 use model::Model;
 
@@ -22,6 +24,7 @@ fn usage() {
         команды:\n\
           zя (без параметров)   запустить в рабочем режиме: хук и значок в трее\n\
           zя run [<сек>] [headless]  то же явно; headless — без окна консоли\n\
+          zя traytest          проверить значок/меню без клавиатурного хука\n\
           zя demo              проверка движка на наборе фраз (без хука)\n\
           zя simtest           модель хука внутри процесса: клавиши -> текст\n\
           zя simarticle        статья 3dnews через модель хука, без окон\n\
@@ -94,6 +97,24 @@ fn write_autostart_flag(on: bool) {
     let file = config::FileConfig::from(&cfg);
     let path = config::config_dir().join("config.json");
     let _ = std::fs::write(path, serde_json::to_string_pretty(&file).unwrap());
+}
+
+fn startup_log(msg: &str) {
+    let dir = config::config_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("startup.log");
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let line = format!("[{}s] {}\n", stamp, msg);
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = file.write_all(line.as_bytes());
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -249,21 +270,56 @@ fn main() -> anyhow::Result<()> {
             if cfg.autostart != autostart::enabled() {
                 autostart::sync_with_config(cfg.autostart);
             }
-            win::install_hook()?;
-            let hwnd = tray::attach().ok();
-            println!(
-                "zя: хук установлен ({}), автопереключение {}.",
-                if hwnd.is_some() {
-                    "значок в трее"
-                } else {
-                    "без значка в трее"
-                },
-                if cfg.auto_enabled {
-                    "включено"
-                } else {
-                    "выключено"
+            startup_log("zя: запуск рабочего режима");
+
+            let hook_ok = match win::install_hook() {
+                Ok(_) => {
+                    startup_log("zя: клавиатурный хук установлен");
+                    true
                 }
-            );
+                Err(e) => {
+                    startup_log(&format!("zя: не удалось установить клавиатурный хук: {e}"));
+                    println!("zя: не удалось установить клавиатурный хук: {e}");
+                    false
+                }
+            };
+
+            let hwnd = match tray::attach() {
+                Ok(h) => {
+                    startup_log("zя: значок в трее создан");
+                    Some(h)
+                }
+                Err(e) => {
+                    startup_log(&format!("zя: не удалось создать значок в трее: {e}"));
+                    println!("zя: не удалось создать значок в трее: {e}");
+                    None
+                }
+            };
+
+            if hook_ok {
+                println!(
+                    "zя: хук установлен ({}), автопереключение {}.",
+                    if hwnd.is_some() {
+                        "значок в трее"
+                    } else {
+                        "без значка в трее"
+                    },
+                    if cfg.auto_enabled {
+                        "включено"
+                    } else {
+                        "выключено"
+                    }
+                );
+            } else {
+                println!(
+                    "zя: работает без клавиатурного хука ({}).",
+                    if hwnd.is_some() {
+                        "значок в трее"
+                    } else {
+                        "без значка в трее"
+                    }
+                );
+            }
             println!(
                 "раскладка активного окна: {}",
                 if win::current_layout_is_russian() {
@@ -289,6 +345,22 @@ fn main() -> anyhow::Result<()> {
                 tray::detach(h);
             }
             win::remove_hook();
+        }
+        "traytest" => {
+            startup_log("zя: traytest: проверка значка без хука");
+            match tray::attach() {
+                Ok(h) => {
+                    println!("zя: значок создан; проверьте трей.");
+                    startup_log("zя: traytest: значок создан");
+                    std::thread::sleep(std::time::Duration::from_secs(4));
+                    tray::detach(h);
+                    println!("zя: traytest завершён");
+                }
+                Err(e) => {
+                    println!("zя: не удалось создать значок: {e}");
+                    startup_log(&format!("zя: traytest: значок не создан: {e}"));
+                }
+            }
         }
         "demo" => demo::run()?,
         "simtest" => sim::sim_test()?,
