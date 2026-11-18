@@ -23,20 +23,43 @@ function Invoke-GitHubJson([string] $url) {
         return Invoke-RestMethod -Uri $url -Headers @{ 'User-Agent' = 'Zya-Installer' } -TimeoutSec 30
     } catch {
         Write-Host "Could not read GitHub API: $($_.Exception.Message)"
-        return $null
     }
+
+    if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+        try {
+            $json = & curl.exe -sL -H "Accept: application/json" -H "User-Agent: Zya-Installer" $url
+            if ($json) {
+                return ($json | ConvertFrom-Json)
+            }
+        } catch {
+        }
+    }
+
+    return $null
 }
 
 function Download-File([string] $url, [string] $destination) {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+
     try {
-        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
         Invoke-WebRequest -Uri $url -OutFile $destination -UserAgent 'Zya-Installer' -TimeoutSec 90
         return Test-Path -LiteralPath $destination
     } catch {
-        Write-Host "Download failed: $url"
+        Write-Host "PowerShell download failed: $url"
         Write-Host "  $($_.Exception.Message)"
-        return $false
     }
+
+    if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+        try {
+            & curl.exe -L --fail --max-time 90 --output $destination $url
+            return Test-Path -LiteralPath $destination
+        } catch {
+            Write-Host "curl download failed: $url"
+            Write-Host "  $($_.Exception.Message)"
+        }
+    }
+
+    return $false
 }
 
 function Get-ReleaseDownloadUrl() {
