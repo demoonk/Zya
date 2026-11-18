@@ -7,6 +7,10 @@ edition = "2021"
 name = "z_single_app"
 path = "src/main.rs"
 
+[[bin]]
+name = "z_single_launcher"
+path = "../tools/zya_launcher.rs"
+
 [dependencies]
 anyhow = "1.0.104"
 serde = { version = "1.0.229", features = ["derive"] }
