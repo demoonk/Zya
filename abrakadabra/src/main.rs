@@ -20,8 +20,8 @@ fn usage() {
         "zя — автопереключатель раскладки (Rust, глобальный клавиатурный хук)\n\
         \n\
         команды:\n\
-          zя run [<сек>] [headless]  поставить хук и остаться в памяти (headless —\n\
-                                      без окна консоли, только значок в трее)\n\
+          zя (без параметров)   запустить в рабочем режиме: хук и значок в трее\n\
+          zя run [<сек>] [headless]  то же явно; headless — без окна консоли\n\
           zя demo              проверка движка на наборе фраз (без хука)\n\
           zя simtest           модель хука внутри процесса: клавиши -> текст\n\
           zя simarticle        статья 3dnews через модель хука, без окон\n\
@@ -148,7 +148,7 @@ fn main() -> anyhow::Result<()> {
 
     match cmd {
         "run" => {
-            let headless = args.iter().any(|a| a == "headless");
+            let headless = args.iter().any(|a| a == "headless") || args.is_empty();
             if headless {
                 win::hide_console();
             }

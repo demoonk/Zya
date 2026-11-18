@@ -17,7 +17,7 @@ install.bat
 Установщик работает так:
 
 1. Ищет уже собранный `zя.exe` или `zya.exe` в `abrakadabra/target/release` или `abrakadabra/target/debug`.
-2. Если его нет, скачивает последнюю версию с GitHub Releases (сейчас это v0.1.1 с пропатченными крупными иконками).
+2. Если его нет, скачивает последнюю версию с GitHub Releases (сейчас это v0.1.1: `zya.exe` — launcher с embedded-бинарём и крупными иконками; `zya_app.exe` — сам бинарник).
 3. Проверяет, запущен ли Punto Switcher.
 4. Копирует программу в `%APPDATA%\Abrakadra\zya.exe`.
 5. Запускает встроенную команду `zya.exe install`, которая кладет рабочую копию в `%APPDATA%\zя\zя.exe`.
@@ -60,6 +60,16 @@ winget install Microsoft.VisualStudio.2022.BuildTools
 ```
 
 Во время установки выбрать workload: `C++ build tools`.
+
+## Запуск без параметров
+
+После установки можно запустить:
+
+```powershell
+zya.exe
+```
+
+или просто двойной клик по `zya.exe`. Без параметров приложение сразу работает: ставится клавиатурный хук и появляется значок в трее.
 
 ## Полезные ключи
 
