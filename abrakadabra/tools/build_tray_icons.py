@@ -78,9 +78,9 @@ def draw_text(text, filled):
     if w <= 0 or h <= 0:
         return glyph.resize((target, target), Image.LANCZOS)
 
-    # Keep the glyph's own proportion: it may touch the left and right edges of
+    # Keep the glyph's own proportion: it touches the left and right edges of
     # the icon, but it is never stretched.
-    margin = 1
+    margin = 0
     available = target - 2 * margin
     scale = min(available / w, available / h)
     nw = max(1, round(w * scale))

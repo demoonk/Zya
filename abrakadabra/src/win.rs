@@ -1359,20 +1359,21 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     CallNextHookEx(None, code, wparam, lparam)
 }
 
-/// True when another copy of zя is already resident. Two instances would both
-/// hook the keyboard and rewrite the same word twice — the classic cause of
-/// "double switches". The named mutex lives for the whole process.
-pub fn another_instance_running() -> bool {
+fn guard_mutex_exists(name: &str) -> bool {
     unsafe {
-        // The Local namespace works for ordinary user processes; creating an
-        // object under `Global\` needs SeCreateGlobalPrivilege and fails with
-        // access denied, which would silently disable the guard.
-        let name: Vec<u16> = "Local\\ZyaLayoutGuard\0".encode_utf16().collect();
-        match CreateMutexW(None, true, PCWSTR(name.as_ptr())) {
+        let wide: Vec<u16> = format!("{name}\0").encode_utf16().collect();
+        match CreateMutexW(None, true, PCWSTR(wide.as_ptr())) {
             Ok(_handle) => GetLastError() == ERROR_ALREADY_EXISTS,
             Err(_) => false,
         }
     }
+}
+
+/// True when another copy of zя is already resident. Two instances would both
+/// hook the keyboard and rewrite the same word twice — the classic cause of
+/// "double switches". The named mutex lives for the whole process.
+pub fn another_instance_running() -> bool {
+    guard_mutex_exists("Local\\ZyaLayoutGuard")
 }
 
 pub fn install_hook() -> anyhow::Result<()> {
@@ -1670,10 +1671,11 @@ mod tests {
 
     #[test]
     fn single_instance_guard_detects_a_second_copy() {
-        // The first call creates the named mutex, the second one finds it: this
-        // is exactly how two resident copies would have double-hooked the keyboard.
-        let first = another_instance_running();
-        let second = another_instance_running();
+        // A private name keeps the test independent from the real resident app
+        // that may be running on this machine.
+        let name = "Local\\ZyaLayoutGuardTest";
+        let first = guard_mutex_exists(name);
+        let second = guard_mutex_exists(name);
         assert!(!first, "the first copy must see no other instance");
         assert!(second, "a second copy must be rejected");
     }
