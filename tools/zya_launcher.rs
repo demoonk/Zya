@@ -7,7 +7,7 @@
 
 use std::io::Write;
 
-const APP: &[u8] = include_bytes!("../release/zya_app.exe");
+const APP: &[u8] = include_bytes!("zya_app.bin");
 
 const DEFAULT_CONFIG: &str = r#"{
   "margin_unknown": 2.5,
