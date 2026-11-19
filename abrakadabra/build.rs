@@ -2,7 +2,7 @@
 //!
 //! MinGW's `windres` turns the .ico and manifest into a COFF object that carries
 //! a proper `.rsrc` section. The icon is used by Explorer and the task bar, while
-//! the manifest asks Windows to launch the app only with administrator rights.
+//! the manifest declares the launch level and makes the app DPI aware.
 //! If `windres` is not on PATH the build continues without these resources.
 
 fn main() {
@@ -17,7 +17,7 @@ fn main() {
     if !manifest.exists() {
         std::fs::write(
             manifest,
-            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<assembly xmlns=\"urn:schemas-microsoft-com:asm.v1\" manifestVersion=\"1.0\">\n  <trustInfo xmlns=\"urn:schemas-microsoft-com:asm.v2\">\n    <security>\n      <requestedPrivileges xmlns=\"urn:schemas-microsoft-com:asm.v3\">\n        <requestedExecutionLevel level=\"requireAdministrator\" uiAccess=\"false\"/>\n      </requestedPrivileges>\n    </security>\n  </trustInfo>\n</assembly>\n",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<assembly xmlns=\"urn:schemas-microsoft-com:asm.v1\" manifestVersion=\"1.0\">\n  <trustInfo xmlns=\"urn:schemas-microsoft-com:asm.v2\">\n    <security>\n      <requestedPrivileges xmlns=\"urn:schemas-microsoft-com:asm.v3\">\n        <requestedExecutionLevel level=\"asInvoker\" uiAccess=\"false\"/>\n      </requestedPrivileges>\n    </security>\n  </trustInfo>\n</assembly>\n",
         )
         .unwrap_or_else(|e| println!("cargo:warning=cannot create data/manifest.xml: {e}"));
     }
@@ -38,8 +38,11 @@ fn main() {
     let rc = std::path::PathBuf::from(&out_dir).join("zya.rc");
     let obj = std::path::PathBuf::from(&out_dir).join("zya_icon.obj");
 
-    std::fs::write(&rc, format!("1 ICON \"{abs_icon}\"\n1 10 \"{abs_manifest}\"\n"))
-        .unwrap_or_else(|e| println!("cargo:warning=cannot write resource rc: {e}"));
+    std::fs::write(
+        &rc,
+        format!("1 ICON \"{abs_icon}\"\n1 10 \"{abs_manifest}\"\n"),
+    )
+    .unwrap_or_else(|e| println!("cargo:warning=cannot write resource rc: {e}"));
 
     let windres = std::env::var("PATH")
         .unwrap_or_default()
