@@ -2,10 +2,43 @@
 
 use std::io::Write;
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::config_dir;
 use crate::engine::Decision;
+
+#[repr(C)]
+struct SYSTEMTIME {
+    w_year: u16,
+    w_month: u16,
+    w_day_of_week: u16,
+    w_day: u16,
+    w_hour: u16,
+    w_minute: u16,
+    w_seconds: u16,
+    w_ms: u16,
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetLocalTime(time: *mut SYSTEMTIME);
+}
+
+/// Diary timestamps are printed in the machine's local time: the user reads the
+/// log next to the clock on the task bar, not in UTC.
+fn local_stamp() -> String {
+    let mut t = SYSTEMTIME {
+        w_year: 0,
+        w_month: 0,
+        w_day_of_week: 0,
+        w_day: 0,
+        w_hour: 0,
+        w_minute: 0,
+        w_seconds: 0,
+        w_ms: 0,
+    };
+    unsafe { GetLocalTime(&mut t) };
+    format!("{:02}:{:02}:{:02}", t.w_hour, t.w_minute, t.w_seconds)
+}
 
 static LOG_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
@@ -85,13 +118,9 @@ fn log_path() -> std::path::PathBuf {
 }
 
 pub fn log(d: &Decision, count: u32) {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let (h, m, s) = (secs / 3600 % 24, secs / 60 % 60, secs % 60);
+    let stamp = local_stamp();
     let line = format!(
-        "[{h:02}:{m:02}:{s:02} UTC] #{count} {} -> {} | {}\n",
+        "[{stamp}] #{count} {} -> {} | {}\n",
         d.original, d.converted, d.why
     );
     if let Ok(mut fh) = std::fs::OpenOptions::new()
@@ -106,7 +135,7 @@ pub fn log(d: &Decision, count: u32) {
     {
         let mut guard = recent.lock().unwrap_or_else(|e| e.into_inner());
         guard.push(Entry {
-            time: format!("{h:02}:{m:02}:{s:02} UTC"),
+            time: stamp,
             original: d.original.clone(),
             converted: d.converted.clone(),
             why: d.why.clone(),
