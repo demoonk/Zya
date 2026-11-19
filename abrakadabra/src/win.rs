@@ -829,9 +829,14 @@ unsafe fn context_blocked(a: &App) -> bool {
         return true;
     }
     let process = foreground_process().to_lowercase();
-    // Never correct our own windows: typing in the settings box would otherwise
-    // fight the hook.
-    if process.ends_with("zя.exe") || process.ends_with("z.exe") {
+    // Never correct our own settings window: typing in the filter box would
+    // otherwise fight the hook. We match the window, not the process, so the
+    // built-in demo windows (and a second copy of the app) still behave normally.
+    if process.ends_with("z.exe") {
+        return true;
+    }
+    let cls = window_class(GetForegroundWindow()).to_lowercase();
+    if cls == "zyasettings" {
         return true;
     }
     let title = foreground_text().to_lowercase();
