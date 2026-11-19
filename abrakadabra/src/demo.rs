@@ -2562,8 +2562,24 @@ unsafe fn press_alt_shift_slow() {
     }
 }
 
+unsafe fn press_win_space() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{keybd_event, KEYBD_EVENT_FLAGS};
+    unsafe {
+        keybd_event(0xA0, 0, KEYBD_EVENT_FLAGS(0), 0);
+        pump_ms(60);
+        keybd_event(0x20, 0, KEYBD_EVENT_FLAGS(0), 0);
+        pump_ms(60);
+        keybd_event(0x20, 0, KEYBD_EVENT_FLAGS(2), 0);
+        pump_ms(60);
+        keybd_event(0xA0, 0, KEYBD_EVENT_FLAGS(2), 0);
+    }
+}
+
+/// Put the editor thread into layout `want`. Windows cycles layouts with
+/// Alt+Shift, but when the second input method is an IME the language bar hotkey
+/// is sometimes ignored, so Win+Space (the input-method switch) is tried too.
 unsafe fn ensure_layout_foreign(root: HWND, site: HWND, want: u32) -> bool {
-    for i in 0..8 {
+    for i in 0..10 {
         focus_site(root, site);
         let tid = GetWindowThreadProcessId(site, None);
         let os = ((GetKeyboardLayout(tid).0 as u64 as u32) & 0xFFFF) as u32;
@@ -2571,7 +2587,11 @@ unsafe fn ensure_layout_foreign(root: HWND, site: HWND, want: u32) -> bool {
             return true;
         }
         println!("diag: layout attempt {i}: site thread {tid} os {os}");
-        press_alt_shift_slow();
+        if i % 2 == 0 {
+            press_alt_shift_slow();
+        } else {
+            press_win_space();
+        }
         pump_ms(400);
     }
     false
