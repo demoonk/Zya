@@ -22,7 +22,7 @@ fn usage() {
     println!(
         "z.exe — автопереключатель раскладки (Rust, глобальный клавиатурный хук)\n\
         \n\
-        Запуск требуется от администратора.\n\
+        Права администратора не нужны: хук и значок работают от обычного пользователя.\n\
         \n\
         команды:\n\
           z.exe (без параметров)   запустить в рабочем режиме: хук и значок в трее\n\
@@ -124,6 +124,7 @@ fn startup_log(msg: &str) {
 }
 
 fn main() -> anyhow::Result<()> {
+    win::make_dpi_aware();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("run");
 
@@ -182,6 +183,14 @@ fn main() -> anyhow::Result<()> {
     }
     if cmd == "settings" || cmd == "настройки" {
         settings::open_blocking();
+        return Ok(());
+    }
+    if cmd == "settest" {
+        settings::self_test();
+        return Ok(());
+    }
+    if cmd == "pickprobe" {
+        settings::pick_probe();
         return Ok(());
     }
     if cmd == "autostart" {
@@ -314,6 +323,13 @@ fn main() -> anyhow::Result<()> {
     match cmd {
         "run" => {
             let headless = args.iter().any(|a| a == "headless") || args.is_empty();
+            // `zя.exe run headless restart` first asks every other copy to quit
+            // through its tray window, so an old build cannot keep hooking the
+            // keyboard next to the new one.
+            if args.iter().any(|a| a == "restart") {
+                let n = win::stop_other_instances();
+                println!("zя: остановлено других экземпляров: {n}");
+            }
             // Do not hide the console until the hook/tray have been checked.
             // If tray creation fails, the error remains visible to the user.
             // The `autostart` field in config.json is the single source of truth:
@@ -346,6 +362,7 @@ fn main() -> anyhow::Result<()> {
             let hwnd = match tray::attach() {
                 Ok(h) => {
                     startup_log("zя: значок в трее создан");
+                    tray::keep_alive();
                     Some(h)
                 }
                 Err(e) => {
@@ -402,7 +419,11 @@ fn main() -> anyhow::Result<()> {
             if let Some(secs) = args.get(1).and_then(|s| s.parse::<u64>().ok()) {
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_secs(secs));
-                    println!("zя: время вышло, переключений: {}", win::switch_count());
+                    println!(
+                        "zя: время вышло, переключений: {}, событий хука: {}",
+                        win::switch_count(),
+                        win::event_count()
+                    );
                     std::process::exit(0);
                 });
             }
@@ -411,6 +432,27 @@ fn main() -> anyhow::Result<()> {
                 tray::detach(h);
             }
             win::remove_hook();
+        }
+        "menutest" => {
+            tray::menu_probe();
+        }
+        "trayprobe" => {
+            // Attach the icon, let the focus guard read the real layout, and
+            // print which of the four pictures is in the notification area.
+            match tray::attach() {
+                Ok(h) => {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    tray::probe();
+                    win::flip_layout_now();
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    tray::probe();
+                    win::flip_layout_now();
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    tray::probe();
+                    tray::detach(h);
+                }
+                Err(e) => println!("zя: значок не создан: {e}"),
+            }
         }
         "traytest" => {
             startup_log("zя: traytest: проверка значка без хука");
@@ -445,6 +487,47 @@ fn main() -> anyhow::Result<()> {
             println!("{keys} -> {out}  ({sw} переключений)");
         }
         "wintest" => demo::window_test()?,
+        "passive" => demo::passive_probe()?,
+        "focustest" => demo::focus_test()?,
+        "notepadtest" => demo::notepad_test()?,
+        "nphook" => demo::notepad_hook_test()?,
+        "nphook2" => demo::notepad_hook_loop_test()?,
+        "hooksmoke" => demo::hook_smoke()?,
+        "watch" => demo::hook_watch(args.get(1).and_then(|s| s.parse().ok()).unwrap_or(10))?,
+        "npkeys" => demo::notepad_keys(&args[1])?,
+        "nptype" => demo::notepad_type(&args[1])?,
+        "npprobe" => demo::notepad_layout_probe()?,
+        "layoutprobe" => {
+            let (focused, root, site_class) = win::layout_probe();
+            println!("zя: раскладка фокусного контрола {site_class:?} = {focused:#06x}");
+            println!("zя: раскладка корневого окна = {root:#06x}");
+        }
+        "hostedit" => {
+            let title = args
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| "zя host".to_string());
+            let secs = args
+                .get(2)
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(60);
+            demo::host_window(&title, secs)?;
+        }
+        "stop" => {
+            let n = win::stop_other_instances();
+            println!("zя: остановлено экземпляров: {n}");
+        }
+        "who" => {
+            println!("zя: pid {}", std::process::id());
+            println!(
+                "zя: другой экземпляр уже работает: {}",
+                win::another_instance_running()
+            );
+            println!(
+                "zя: раскладка активного окна: {:#06x}",
+                win::active_layout_langid()
+            );
+        }
         "article" => demo::article_test()?,
         "selprobe" => {
             let class = args.get(1).cloned().unwrap_or_else(|| "EDIT".to_string());

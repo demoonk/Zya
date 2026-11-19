@@ -14,7 +14,7 @@ pub struct FileConfig {
     pub margin_known: f32,
     #[serde(default = "default_word_bonus")]
     pub word_bonus: f32,
-    #[serde(default)]
+    #[serde(default = "default_plausibility")]
     pub plausibility: f32,
     #[serde(default = "default_min_len")]
     pub min_len: usize,
@@ -54,6 +54,9 @@ fn default_margin_known() -> f32 {
 }
 fn default_word_bonus() -> f32 {
     20.0
+}
+fn default_plausibility() -> f32 {
+    -12.0
 }
 fn default_min_len() -> usize {
     3

@@ -904,7 +904,10 @@ mod tests {
         assert_eq!(sim.out, "контекст");
         sim.press(&e, 'б');
         assert_eq!(sim.out, "контекст,", "б is the comma key");
-        assert!(sim.layout_is_russian(), "a punctuation fix keeps the layout");
+        assert!(
+            sim.layout_is_russian(),
+            "a punctuation fix keeps the layout"
+        );
     }
 
     /// Смена активного окна сбрасывает буфер: недописанное слово не склеивается

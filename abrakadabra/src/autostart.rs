@@ -28,7 +28,8 @@ fn remove_old_entries() {
 }
 
 pub fn enabled() -> bool {
-    run_reg(&["query", KEY, "/v", VALUE]) || OLD_VALUES.iter().any(|v| run_reg(&["query", KEY, "/v", v]))
+    run_reg(&["query", KEY, "/v", VALUE])
+        || OLD_VALUES.iter().any(|v| run_reg(&["query", KEY, "/v", v]))
 }
 
 /// Write (or remove) the Run entry. `path` is the executable that Windows will

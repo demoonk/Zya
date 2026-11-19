@@ -1,10 +1,24 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <!-- A low-level keyboard hook and a tray icon do not need administrator rights.
+    Requiring them made the autostart entry fail silently at logon on a fresh
+    machine: the process was refused, so the tray icon and its menu never
+    appeared. Running as the ordinary user fixes that. -->
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
     <security>
       <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
-        <requestedExecutionLevel level="requireAdministrator" uiAccess="false"/>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
       </requestedPrivileges>
     </security>
   </trustInfo>
+  <!-- Without this the process is DPI-unaware: Windows bitmap-scales the whole
+       settings window by the display scale, so at 150% the text came out smeared
+       and the tray menu was placed with the wrong offsets. Being DPI-aware lets
+       the code multiply its 96-DPI layout constants by the real DPI instead. -->
+  <application>
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">permonitorv2</dpiAwareness>
+    </windowsSettings>
+  </application>
 </assembly>

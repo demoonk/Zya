@@ -1447,7 +1447,9 @@ mod tests {
 
         // A quoted word typed in the wrong layout is translated too; the quotes
         // are restored, the layout does have to change for that.
-        let d = e.decide("ЭруддщЭ").expect("ЭруддщЭ should become \"hello\"");
+        let d = e
+            .decide("ЭруддщЭ")
+            .expect("ЭруддщЭ should become \"hello\"");
         assert_eq!(d.converted, "\"hello\"");
 
         // A real Russian word starting with Э must not be eaten by an opening quote.

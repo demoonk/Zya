@@ -42,7 +42,7 @@ const DEFAULT_CONFIG: &str = r#"{
   "margin_unknown": 2.5,
   "margin_known": 1.0,
   "word_bonus": 20.0,
-  "plausibility": 0.0,
+  "plausibility": -12.0,
   "min_len": 3,
   "protect_code": true,
   "hotkey_undo": "alt",
@@ -205,14 +205,11 @@ fn message(title: &str, text: &str, flags: u32) {
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
+    // zя does not need administrator rights: the keyboard hook and the tray icon
+    // work for the current user. Requiring them made the first launch fail on a
+    // fresh machine (the UAC prompt was dismissed), so the menu never appeared.
     if !unsafe { IsUserAnAdmin() }.as_bool() {
-        message(
-            "Требуются права администратора",
-            "z.exe должен запускаться с правами администратора.\nЗапустите его от имени администратора.",
-            MB_ICONERROR,
-        );
-        eprintln!("z.exe must be launched as administrator. Run it with administrator rights.");
-        std::process::exit(1);
+        eprintln!("z.exe: работаем без прав администратора (они не нужны)");
     }
 
     let dir = app_data_dir();
@@ -223,7 +220,11 @@ fn main() -> std::io::Result<()> {
             &format!("Не удалось создать папку {} : {}", dir.display(), e),
             MB_ICONERROR,
         );
-        eprintln!("z.exe launcher error: cannot create {} : {}", dir.display(), e);
+        eprintln!(
+            "z.exe launcher error: cannot create {} : {}",
+            dir.display(),
+            e
+        );
         return Err(e);
     }
 
@@ -235,19 +236,17 @@ fn main() -> std::io::Result<()> {
     let config_path = dir.join("config.json");
     let config_text = match std::fs::read_to_string(&config_path) {
         Ok(text) => text,
-        Err(read_err) => {
-            match std::fs::write(&config_path, DEFAULT_CONFIG) {
-                Ok(_) => DEFAULT_CONFIG.to_string(),
-                Err(e) => {
-                    message(
-                        "Ошибка установки zя",
-                        &format!("Не удалось создать config.json: {e}\nОшибка чтения: {read_err}"),
-                        MB_ICONERROR,
-                    );
-                    return Err(e);
-                }
+        Err(read_err) => match std::fs::write(&config_path, DEFAULT_CONFIG) {
+            Ok(_) => DEFAULT_CONFIG.to_string(),
+            Err(e) => {
+                message(
+                    "Ошибка установки zя",
+                    &format!("Не удалось создать config.json: {e}\nОшибка чтения: {read_err}"),
+                    MB_ICONERROR,
+                );
+                return Err(e);
             }
-        }
+        },
     };
 
     let diary_path = dir.join("diario.log");
@@ -275,7 +274,10 @@ fn main() -> std::io::Result<()> {
 
     if std::env::var("ZYA_NO_AUTOSTART").is_err() && config_wants_autostart(&config_text) {
         if !ensure_autostart(&installed_path.display().to_string()) {
-            append_startup_log(&dir, "z.exe launcher: не удалось зарегистрировать автозапуск");
+            append_startup_log(
+                &dir,
+                "z.exe launcher: не удалось зарегистрировать автозапуск",
+            );
         }
     }
 

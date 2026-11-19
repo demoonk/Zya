@@ -7,7 +7,11 @@ use std::sync::{Mutex, OnceLock};
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, HANDLE, HGLOBAL, HWND, GetLastError, LPARAM, LRESULT, WPARAM,
+    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, ERROR_SHARING_VIOLATION, GENERIC_READ,
+    GENERIC_WRITE, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, WPARAM,
+};
+use windows::Win32::Storage::FileSystem::{
+    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_NONE, OPEN_ALWAYS,
 };
 use windows::Win32::System::Threading::{
     CreateMutexW, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
@@ -22,18 +26,53 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_RWIN, VK_SHIFT, VK_SPACE, VK_TAB, VK_V,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetClassNameW, GetForegroundWindow, GetMessageW,
-    GetWindowTextW, GetWindowThreadProcessId, SetWindowsHookExW, TranslateMessage,
-    UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, LLKHF_UP, MSG, WH_KEYBOARD_LL,
+    CallNextHookEx, DispatchMessageW, FindWindowW, GetClassNameW, GetForegroundWindow, GetMessageW,
+    GetWindow, GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible, PostMessageW,
+    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, GW_CHILD, GW_HWNDNEXT, HHOOK,
+    KBDLLHOOKSTRUCT, LLKHF_UP, MSG, WH_KEYBOARD_LL, WM_COMMAND,
 };
 
 use crate::engine::{Config, Decision, Engine};
 
+#[link(name = "user32")]
+extern "system" {
+    fn SetProcessDpiAwarenessContext(value: isize) -> i32;
+}
+
+/// The layout of the settings window and the tray menu is designed for 96 DPI
+/// and multiplied by the real display scale, so the process has to be DPI-aware
+/// first; otherwise Windows bitmap-stretches the whole window and the numbers
+/// no longer match the pixels.
+pub fn make_dpi_aware() {
+    unsafe {
+        // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+        if SetProcessDpiAwarenessContext(-4) == 0 {
+            SetProcessDpiAwarenessContext(-3);
+        }
+    }
+}
+
 const RU_LANGID: u32 = 0x0419;
 const EN_LANGID: u32 = 0x0409;
 const DOWN_MASK: i16 = -32768; // 0x8000: "key is down" bit of GetAsyncKeyState
-/// Tag we put on every event we inject ourselves, so the hook ignores it.
+/// Base of the tag we put on every event we inject ourselves, so the hook can
+/// tell its own keystrokes apart from the user's.
+///
+/// The process id is added to the tag: when a *second* copy of zя is resident,
+/// both copies rewrite the same word and the user sees a double switch. Events
+/// tagged by another process are recognised and ignored, and the automatic layer
+/// of the losing copy stands down.
 const SELF_MAGIC: usize = 0x5A59_4100;
+
+fn self_tag() -> usize {
+    static TAG: OnceLock<usize> = OnceLock::new();
+    *TAG.get_or_init(|| SELF_MAGIC + std::process::id() as usize)
+}
+
+/// An event injected by a different zя process (old builds used the bare base).
+fn foreign_tag(extra: usize) -> bool {
+    extra != self_tag() && extra >= SELF_MAGIC && extra < SELF_MAGIC + 0x1_0000_0000
+}
 
 const MODIFIERS: [u16; 9] = [
     VK_SHIFT.0,
@@ -138,6 +177,18 @@ pub struct App {
     /// after a real Alt+Shift switch), so we seed it from the OS when the
     /// foreground window changes and then track every Alt+Shift that happens.
     lang: u32,
+    /// Last layout reported by the focused-control probe, used only to print the
+    /// diagnostic line once per change.
+    lang_debug: u32,
+    /// Foreground window the input-site walk below was done for, and the child
+    /// control of that window that actually receives the keystrokes.
+    site_window: usize,
+    site_ctrl: usize,
+    /// The window that was focused while the pending word was typed. A rewrite
+    /// must never land in a different application than the one the word belongs
+    /// to.
+    word_window: usize,
+    /// Layout id reported by the OS for the foreground window's thread.
     last_fg: usize,
     /// Modifier bookkeeping, so we can tell a genuine Alt+Shift layout switch
     /// from Alt+Shift+<key> shortcuts. `GetAsyncKeyState` is not reliable inside
@@ -178,14 +229,30 @@ pub struct App {
     /// not run then: the user had a selection, the application simply refused
     /// to hand it over, and deleting characters would corrupt their text.
     selection_done: bool,
+    /// Set when a keystroke tagged by *another* zя process reaches this hook: a
+    /// second instance is resident and the two of them would rewrite the same
+    /// word. The automatic layer of this copy then stands down.
+    foreign: bool,
+    /// The last few automatic conversions, newest first. Used by the ping-pong
+    /// guard: if a token is flipped back to exactly what it was a moment ago,
+    /// the layout tracking (or a competing hook) is fighting itself.
+    recent_flips: Vec<(String, String, std::time::Instant)>,
 }
 
 static APP: OnceLock<Mutex<App>> = OnceLock::new();
 static HOOK: OnceLock<usize> = OnceLock::new();
+static LOCK_FILE: OnceLock<usize> = OnceLock::new();
 static EVENTS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 pub fn event_count() -> i64 {
     EVENTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// True when a keystroke injected by *another* zя process has been seen: two
+/// copies are hooking the keyboard at the same time.
+pub fn foreign_instance_seen() -> bool {
+    APP.get()
+        .map_or(false, |a| a.lock().map_or(false, |a| a.foreign))
 }
 
 fn app() -> &'static Mutex<App> {
@@ -232,7 +299,9 @@ fn app() -> &'static Mutex<App> {
             auto,
             switches: 0,
             lang: EN_LANGID,
+            lang_debug: 0,
             last_fg: 0,
+            word_window: 0,
             alt_down: false,
             shift_down: false,
             ctrl_down: false,
@@ -241,6 +310,8 @@ fn app() -> &'static Mutex<App> {
             alt_pending: false,
             secret: false,
             secret_fg: 0,
+            site_window: 0,
+            site_ctrl: 0,
             hotkey_undo: undo_key,
             hotkey_toggle: toggle_key,
             hotkey_last: last_key,
@@ -251,6 +322,8 @@ fn app() -> &'static Mutex<App> {
             closed: None,
             prev_word: String::new(),
             selection_done: false,
+            foreign: false,
+            recent_flips: Vec::new(),
         })
     })
 }
@@ -335,19 +408,205 @@ fn hkl_for(langid: u32) -> HKL {
 /// Re-read the layout when the foreground window changes; once we have seen a
 /// real layout switch we stop trusting GetKeyboardLayout (it is stale in apps
 /// such as Windows 11 Notepad) and rely on our own bookkeeping.
-unsafe fn sync_layout(a: &mut App) {
+/// Layout id reported by the OS for the thread that owns the foreground window.
+unsafe fn current_langid() -> u32 {
     let hwnd = GetForegroundWindow();
-    let id = hwnd.0 as usize;
-    if id != 0 && a.last_fg != id {
-        a.last_fg = id;
-        let lid = langid_of(foreground_hkl());
-        if lid == RU_LANGID || lid == EN_LANGID {
-            a.lang = lid;
+    if hwnd.0.is_null() {
+        return 0;
+    }
+    langid_of(GetKeyboardLayout(GetWindowThreadProcessId(hwnd, None)))
+}
+
+unsafe fn window_class(hwnd: HWND) -> String {
+    let mut buf = vec![0u16; 128];
+    let n = GetClassNameW(hwnd, &mut buf);
+    if n > 0 {
+        String::from_utf16_lossy(&buf[..n.max(0) as usize])
+    } else {
+        String::new()
+    }
+}
+
+fn handle_of(hwnd: HWND) -> usize {
+    hwnd.0 as usize
+}
+
+fn hwnd_of(handle: usize) -> HWND {
+    HWND(handle as *mut std::ffi::c_void)
+}
+
+/// A child window that actually receives the typed characters. Windows keeps the
+/// keyboard layout *per thread*, and in modern applications the text control is
+/// owned by a different thread than the top-level window: the Windows 11 Notepad
+/// editor (`NotepadTextBox` / `RichEditD2DPT`) and every Chromium/Electron based
+/// app (Teams, browsers) live in a worker thread whose layout changes with
+/// Alt+Shift while the root window's thread keeps the old one.
+fn is_input_site(class: &str) -> bool {
+    let c = class.to_lowercase();
+    [
+        "edit",
+        "richedit",
+        "richtext",
+        "notepadtextbox",
+        "text",
+        "input",
+        "textarea",
+        "renderwidgethost",
+        "widgetwin",
+        "document",
+        "console",
+    ]
+    .iter()
+    .any(|needle| c.contains(needle))
+}
+
+/// Walk the visible descendants of the foreground window and return the keyboard
+/// layout of the deepest window that looks like an input site. Falls back to the
+/// root window when no such control is found.
+unsafe fn focused_site() -> HWND {
+    let root = GetForegroundWindow();
+    if root.0.is_null() {
+        return root;
+    }
+    let null = HWND(std::ptr::null_mut());
+    let mut site = root;
+    let mut queue = vec![root];
+    let mut head = 0;
+    // Breadth-first: deeper controls are visited later, so the deepest input
+    // site wins.
+    while head < queue.len() {
+        let w = queue[head];
+        head += 1;
+        let mut child = GetWindow(w, GW_CHILD).unwrap_or(null);
+        while !child.0.is_null() {
+            if IsWindowVisible(child).as_bool() {
+                queue.push(child);
+                if is_input_site(&window_class(child)) {
+                    site = child;
+                }
+            }
+            child = GetWindow(child, GW_HWNDNEXT).unwrap_or(null);
         }
+    }
+    site
+}
+
+/// The site walk is done once per foreground window, not once per keystroke:
+/// typing runs through here thousands of times a minute and the window tree of
+/// a Chromium app is large enough to matter.
+unsafe fn focused_site_cached(a: &mut App) -> HWND {
+    let fg = GetForegroundWindow();
+    if fg.0.is_null() {
+        return fg;
+    }
+    if a.site_window != handle_of(fg) || !IsWindow(Some(fg)).as_bool() {
+        a.site_window = handle_of(fg);
+        a.site_ctrl = handle_of(focused_site());
+    }
+    let site = hwnd_of(a.site_ctrl);
+    if site.0.is_null() || !IsWindow(Some(site)).as_bool() {
+        a.site_ctrl = handle_of(focused_site());
+    }
+    hwnd_of(a.site_ctrl)
+}
+
+unsafe fn focused_langid_in(a: &mut App) -> u32 {
+    let site = focused_site_cached(a);
+    if site.0.is_null() {
+        return 0;
+    }
+    langid_of(GetKeyboardLayout(GetWindowThreadProcessId(site, None)))
+}
+
+/// Diagnostic helper used by the tests: (layout of the focused control, layout of
+/// the root window, class of the focused control).
+pub fn layout_probe() -> (u32, u32, String) {
+    unsafe {
+        let site = focused_site();
+        (
+            langid_of(GetKeyboardLayout(GetWindowThreadProcessId(site, None))),
+            current_langid(),
+            window_class(site),
+        )
+    }
+}
+
+pub fn active_layout_langid() -> u32 {
+    unsafe { current_langid() }
+}
+
+/// Force the tracked layout to flip without typing: used by `trayprobe` to see
+/// the icon change and by the focus guard tests.
+pub fn flip_layout_now() {
+    unsafe {
+        let mut a = app().lock().unwrap();
+        flip_tracked(&mut a);
+    }
+}
+
+/// Re-read the layout of the focused control into the tracked state.
+pub fn sync_layout_now() {
+    unsafe {
+        let mut a = app().lock().unwrap();
+        sync_layout(&mut a);
+        sync_tray(&a);
+    }
+}
+
+/// Does the hook currently consider `hwnd` to be the window that owns the text
+/// being typed? Used by the focus test to verify the internal state, not just
+/// what the OS reports.
+pub fn foreground_window_matches(hwnd: HWND) -> bool {
+    unsafe {
+        let fg = GetForegroundWindow().0 as usize;
+        let want = hwnd.0 as usize;
+        APP.get().map_or(false, |a| {
+            let a = a.lock().unwrap();
+            a.word_window == want || a.last_fg == want
+        }) && fg == want
+    }
+}
+
+/// Re-read the active layout from the OS. The keyboard layout of the thread that
+/// owns the focused control is exactly the one `ToUnicodeEx` must use for the
+/// keystroke we are about to translate, so it is the only trustworthy source.
+/// The root window is queried only as a fallback (its thread can report a stale
+/// layout, which is why Notepad and Teams used to be "blind"). The tracked value
+/// is kept only as a last resort when both queries fail.
+unsafe fn sync_layout(a: &mut App) {
+    let lid = focused_langid_in(a);
+    if lid == RU_LANGID || lid == EN_LANGID {
+        a.lang = lid;
+        if verbose() && a.lang_debug != lid {
+            let site = focused_site_cached(a);
+            println!(
+                "layout sync {:#06x}: site {} thread {}",
+                lid,
+                window_class(site),
+                GetWindowThreadProcessId(site, None)
+            );
+            a.lang_debug = lid;
+        }
+        return;
+    }
+    // No input control under focus (desktop, a game, a dialog without a text
+    // box): the layout of the foreground window's thread is the real one.
+    let lid = langid_of(foreground_hkl());
+    if lid == RU_LANGID || lid == EN_LANGID {
+        a.lang = lid;
+        return;
+    }
+    let lid = current_langid();
+    if lid == RU_LANGID || lid == EN_LANGID {
+        a.lang = lid;
     }
 }
 
 unsafe fn flip_tracked(a: &mut App) {
+    // A low-level hook sees the Alt+Shift release *before* the OS has applied the
+    // layout switch, so GetKeyboardLayout still reports the old layout at this
+    // instant. Flipping relative to that value is what the OS will do a moment
+    // later, which keeps the tracked layout in step with the real one.
     sync_layout(a);
     if a.lang == RU_LANGID || a.lang == EN_LANGID {
         a.lang = other_layout(a.lang);
@@ -477,7 +736,7 @@ fn key(vk: VIRTUAL_KEY, up: bool) -> INPUT {
                     KEYBD_EVENT_FLAGS(0)
                 },
                 time: 0,
-                dwExtraInfo: SELF_MAGIC,
+                dwExtraInfo: self_tag(),
             },
         },
     }
@@ -496,7 +755,7 @@ fn unicode(c: char, up: bool) -> INPUT {
                     KEYEVENTF_UNICODE
                 },
                 time: 0,
-                dwExtraInfo: SELF_MAGIC,
+                dwExtraInfo: self_tag(),
             },
         },
     }
@@ -531,6 +790,12 @@ unsafe fn rewrite(delete: usize, text: &str, trailing: Option<char>, flip: bool)
         inputs.push(key(VK_LSHIFT, true));
         inputs.push(key(VK_LMENU, true));
     }
+    if verbose() {
+        println!(
+            "rewrite tid={} delete={delete} text={text:?} trailing={trailing:?} flip={flip}",
+            unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }
+        );
+    }
     let n = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
     if n == 0 && verbose() {
         println!(
@@ -563,11 +828,16 @@ unsafe fn context_blocked(a: &App) -> bool {
     if a.secret {
         return true;
     }
+    let process = foreground_process().to_lowercase();
+    // Never correct our own windows: typing in the settings box would otherwise
+    // fight the hook.
+    if process.ends_with("zя.exe") || process.ends_with("z.exe") {
+        return true;
+    }
     let title = foreground_text().to_lowercase();
     if title.contains("password") || title.contains("пароль") {
         return true;
     }
-    let process = foreground_process().to_lowercase();
     if a.cfg
         .exclude_processes
         .iter()
@@ -590,7 +860,7 @@ use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM
 const CF_UNICODE: u32 = 13;
 
 /// The Unicode clipboard contents, or None when there is no text.
-unsafe fn clipboard_text() -> Option<String> {
+pub unsafe fn clipboard_text() -> Option<String> {
     if OpenClipboard(None).is_err() {
         return None;
     }
@@ -702,7 +972,7 @@ const CLIP_SENTINEL: &str = "\u{1}zya-no-selection\u{1}";
 /// This must not run inside the hook callback: SendInput events injected while
 /// the hook is still executing only reach the application after the callback
 /// returns, so the Ctrl+C would land after the clipboard read.
-unsafe fn selection_action(op: SelOp) -> Option<String> {
+unsafe fn selection_action(op: SelOp) -> Option<(String, String)> {
     // The gesture fires on key-down, while the user is still holding Ctrl/Alt/
     // Shift. Injecting our own Ctrl+C on top of a held Ctrl makes the target
     // application see a stray modifier-up in the middle of the paste, so wait
@@ -770,46 +1040,102 @@ unsafe fn selection_action(op: SelOp) -> Option<String> {
     if let Some(s) = &saved {
         set_clipboard(s);
     }
-    Some(transformed)
+    Some((selection, transformed))
 }
+
+static GESTURE_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Run a selection gesture on a side thread so the injected Ctrl+C/Ctrl+V can
 /// actually reach the focused application. `prefer_token` asks for the
 /// last-word fallback when nothing is selected.
+///
+/// Only one gesture runs at a time. Pressing Break twice in a row used to start
+/// two of them, and both deleted and retyped the same token — the visible
+/// "double switch". The second press is swallowed.
 fn spawn_selection(op: SelOp, lang: u32, prefer_token: bool) {
-    std::thread::spawn(move || {
-        let Some(text) = (unsafe { selection_action(op) }) else {
-            // Nothing was copied. That is only a "no selection" case when the
-            // clipboard still holds our marker *and* no earlier selection
-            // gesture went through; otherwise the app had a selection it did
-            // not copy, and deleting characters would eat the user's text.
-            let had_selection = {
-                let mut a = app().lock().unwrap();
-                let had = a.selection_done;
-                a.selection_done = false;
-                had
-            };
-            if prefer_token && !had_selection {
-                let mut a = app().lock().unwrap();
-                if op == SelOp::SwapLayout {
-                    swap_last_token(&mut a);
-                } else {
-                    change_last_case(&mut a, op);
-                }
-            }
-            return;
-        };
-        let mut a = app().lock().unwrap();
-        if op == SelOp::SwapLayout {
-            a.lang = other_layout(lang);
+    if GESTURE_BUSY.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        if verbose() {
+            println!("gesture {op:?} still running; this Break is ignored");
         }
-        a.word.clear();
-        a.run.clear();
-        a.closed = Some((text, None));
-        a.last = None;
-        a.selection_done = true;
-        sync_tray(&a);
+        return;
+    }
+    std::thread::spawn(move || {
+        unsafe {
+            selection_gesture(op, lang, prefer_token);
+        }
+        GESTURE_BUSY.store(false, std::sync::atomic::Ordering::Relaxed);
     });
+}
+
+unsafe fn selection_gesture(op: SelOp, lang: u32, prefer_token: bool) {
+    let Some((before, text)) = selection_action(op) else {
+        // Nothing was copied. That is only a "no selection" case when the
+        // clipboard still holds our marker *and* no earlier selection gesture
+        // went through; otherwise the app had a selection it did not copy, and
+        // deleting characters would eat the user's text.
+        let had_selection = {
+            let mut a = app().lock().unwrap();
+            let had = a.selection_done;
+            a.selection_done = false;
+            had
+        };
+        if prefer_token && !had_selection {
+            let mut a = app().lock().unwrap();
+            if op == SelOp::SwapLayout {
+                swap_last_token(&mut a);
+            } else {
+                change_last_case(&mut a, op);
+            }
+        }
+        return;
+    };
+
+    let mut a = app().lock().unwrap();
+    // A selection gesture is a replacement too: it belongs in the diary and in
+    // the switch counter, otherwise the log looks empty while Break works.
+    if before != text {
+        a.switches += 1;
+        let why = match op {
+            SelOp::SwapLayout => "вручную: смена раскладки выделения",
+            SelOp::Upper => "вручную: верхний регистр выделения",
+            SelOp::Invert => "вручную: смена регистра выделения",
+        };
+        record_flip(&mut a, &before, &text);
+        crate::diary::log(
+            &Decision {
+                original: before,
+                converted: text.clone(),
+                target: if op == SelOp::SwapLayout {
+                    crate::engine::TargetLayout::Russian
+                } else {
+                    crate::engine::TargetLayout::English
+                },
+                why: why.to_string(),
+                flip: op == SelOp::SwapLayout,
+            },
+            a.switches,
+        );
+    }
+    if op == SelOp::SwapLayout {
+        a.lang = other_layout(lang);
+    }
+    a.word.clear();
+    a.run.clear();
+    a.closed = Some((text, None));
+    a.last = None;
+    a.selection_done = true;
+    sync_tray(&a);
+}
+
+fn record_flip(a: &mut App, original: &str, converted: &str) {
+    a.recent_flips.push((
+        original.to_string(),
+        converted.to_string(),
+        std::time::Instant::now(),
+    ));
+    if a.recent_flips.len() > 12 {
+        a.recent_flips.remove(0);
+    }
 }
 
 /// Switch the layout of the token typed most recently. `run` is the text that is
@@ -839,6 +1165,7 @@ fn swap_last_token(a: &mut App) {
     a.run.clear();
     a.closed = Some((mirrored.clone(), boundary));
     a.prev_word = mirrored.clone();
+    record_flip(a, &token, &mirrored);
     let d = Decision {
         original: token,
         converted: mirrored,
@@ -846,6 +1173,7 @@ fn swap_last_token(a: &mut App) {
         why: "вручную: смена раскладки последнего слова".into(),
         flip: true,
     };
+    a.switches += 1;
     crate::diary::log(&d, a.switches);
     a.last = Some(d);
 }
@@ -874,6 +1202,7 @@ fn change_last_case(a: &mut App, op: SelOp) {
     a.last = None;
     a.last_boundary = boundary;
 
+    a.switches += 1;
     crate::diary::log(
         &Decision {
             original: token,
@@ -938,10 +1267,7 @@ fn boundary_to_write(c: char, flip: bool) -> char {
 
 unsafe fn decide_word_on_boundary(a: &mut App, word: &str, c: char) -> bool {
     if verbose() {
-        println!(
-            "boundary: word={word:?} langid={} auto={}",
-            a.lang, a.auto
-        );
+        println!("boundary: word={word:?} langid={} auto={}", a.lang, a.auto);
     }
 
     if !a.auto {
@@ -969,26 +1295,58 @@ unsafe fn decide_word_on_boundary(a: &mut App, word: &str, c: char) -> bool {
     let prev = a.prev_word.clone();
     match a.engine.decide_with(word, &prev) {
         Some(d) => {
+            // Ping-pong guard. A token that is flipped back to exactly what it
+            // was a couple of seconds ago is not a correction, it is the same
+            // correction fighting itself (stale layout tracking or a second
+            // hook). Repeating the *same* correction is still allowed.
+            let ping_pong = a.recent_flips.iter().any(|(orig, conv, at)| {
+                at.elapsed() < std::time::Duration::from_secs(5)
+                    && *orig == d.converted
+                    && *conv == d.original
+            });
+            if ping_pong {
+                if verbose() {
+                    println!("skip {word}: ping-pong guard (just flipped back)");
+                }
+                a.last = None;
+                return false;
+            }
             a.switches += 1;
+            a.recent_flips.push((
+                d.original.clone(),
+                d.converted.clone(),
+                std::time::Instant::now(),
+            ));
+            if a.recent_flips.len() > 12 {
+                a.recent_flips.remove(0);
+            }
             if verbose() {
                 println!("decision: {word} -> {}", d.converted);
             }
             crate::diary::log(&d, a.switches);
 
             let swallow = !c.is_control();
-            let boundary = boundary_to_write(c, d.flip);
+            // Only switch the layout if it is not already where the corrected
+            // token needs it. Injecting Alt+Shift when the OS is already on the
+            // target layout is what made the layout drift.
+            let target_lid = match d.target {
+                crate::engine::TargetLayout::Russian => RU_LANGID,
+                crate::engine::TargetLayout::English => EN_LANGID,
+            };
+            let need_flip = d.flip && current_langid() != target_lid;
+            let boundary = boundary_to_write(c, need_flip);
             let n = rewrite(
                 d.original.chars().count(),
                 &d.converted,
                 if swallow { Some(boundary) } else { None },
-                d.flip,
+                need_flip,
             );
             if verbose() {
                 println!("   rewrite injected {n} events");
             }
 
-            if d.flip {
-                a.lang = other_layout(a.lang);
+            if need_flip {
+                a.lang = target_lid;
             }
             sync_tray(a);
             a.word.clear();
@@ -1004,6 +1362,36 @@ unsafe fn decide_word_on_boundary(a: &mut App, word: &str, c: char) -> bool {
             return false;
         }
     }
+}
+
+fn stand_down_against_foreign() {
+    // `ZYA_IGNORE_FOREIGN=1` keeps the automatic layer on even when another copy
+    // is hooking the keyboard; the self-tests use it to measure their own hook.
+    if std::env::var("ZYA_IGNORE_FOREIGN").is_ok() {
+        return;
+    }
+    let mut a = app().lock().unwrap();
+    if a.foreign {
+        return;
+    }
+    a.foreign = true;
+    a.auto = false;
+    eprintln!(
+        "zя: клавиатуру уже перехватывает другой экземпляр (наши события помечены тегом {:#x}, \
+        чужие — нет). Автоматическое исправление в этом процессе выключено, \
+        ручные клавиши (Break, Alt) продолжают работать.",
+        self_tag()
+    );
+    crate::diary::log(
+        &Decision {
+            original: "второй экземпляр".to_string(),
+            converted: "автовыключено".to_string(),
+            target: crate::engine::TargetLayout::English,
+            why: "клавиатуру уже перехватывает другой экземпляр zя".to_string(),
+            flip: false,
+        },
+        a.switches,
+    );
 }
 
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -1024,7 +1412,30 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     let vk = kbd.vkCode as u16;
 
     // Never react to events we injected ourselves (identified by the tag).
-    if kbd.dwExtraInfo == SELF_MAGIC {
+    if kbd.dwExtraInfo == self_tag() {
+        if verbose() {
+            println!(
+                "self-injected tid={} vk={} scan={}",
+                unsafe { windows::Win32::System::Threading::GetCurrentThreadId() },
+                vk,
+                kbd.scanCode
+            );
+        }
+        return CallNextHookEx(None, code, wparam, lparam);
+    }
+
+    // A zя-tagged event that does not carry *our* pid means another copy of zя
+    // is hooking the keyboard at the same time. Both copies delete and retype
+    // the same word, which is the classic "double switch". The copy that noticed
+    // it stops correcting automatically; its manual hotkeys keep working.
+    if foreign_tag(kbd.dwExtraInfo) {
+        if verbose() {
+            println!(
+                "foreign-injected vk={vk} scan={} extra={}",
+                kbd.scanCode, kbd.dwExtraInfo
+            );
+        }
+        stand_down_against_foreign();
         return CallNextHookEx(None, code, wparam, lparam);
     }
 
@@ -1110,6 +1521,27 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     // Key-up events carry the LLKHF_UP flag; only presses are interesting.
     if kbd.flags.contains(LLKHF_UP) {
         return CallNextHookEx(None, code, wparam, lparam);
+    }
+
+    // Precise focus control. The pending word belongs to the window that was
+    // focused while it was typed. If the foreground window changed in between,
+    // the buffer is dropped: rewriting it would inject backspaces and text into
+    // a different application, which is the "то работает, то не работает" case.
+    {
+        let fg = GetForegroundWindow().0 as usize;
+        let mut a = app().lock().unwrap();
+        if fg != a.word_window {
+            if verbose() && (!a.word.is_empty() || !a.run.is_empty()) {
+                println!(
+                    "focus change {:#x} -> {:#x}: pending {:?} dropped",
+                    a.word_window, fg, a.word
+                );
+            }
+            a.word.clear();
+            a.run.clear();
+            a.closed = None;
+            a.word_window = fg;
+        }
     }
 
     {
@@ -1220,6 +1652,9 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     let Some(mut c) = char_in_layout(vk, kbd.scanCode, &state, hkl) else {
         return CallNextHookEx(None, code, wparam, lparam);
     };
+    if verbose() {
+        println!("key {c:?} langid {lid} word {:?}", &a.word);
+    }
     // ToUnicodeEx inside a low-level hook does not always honour the shift
     // state, so normalise letter case from the modifiers we tracked ourselves.
     if a.shift_down && c.is_alphabetic() {
@@ -1373,7 +1808,84 @@ fn guard_mutex_exists(name: &str) -> bool {
 /// hook the keyboard and rewrite the same word twice — the classic cause of
 /// "double switches". The named mutex lives for the whole process.
 pub fn another_instance_running() -> bool {
-    guard_mutex_exists("Local\\ZyaLayoutGuard")
+    if guard_mutex_exists("Local\\ZyaLayoutGuard") {
+        return true;
+    }
+    if lock_file_taken() {
+        return true;
+    }
+    // Belt and braces: every resident copy owns a hidden tray window of class
+    // "ZyaTray". We check this *before* our own tray window is created, so a
+    // found window means another copy is resident even when the mutex and the
+    // lock file are both unreadable (restricted tokens, sandboxed launches).
+    unsafe {
+        let class: Vec<u16> = "ZyaTray\0".encode_utf16().collect();
+        match FindWindowW(PCWSTR(class.as_ptr()), PCWSTR::null()) {
+            Ok(h) => !h.0.is_null(),
+            Err(_) => false,
+        }
+    }
+}
+
+fn lock_file_taken() -> bool {
+    unsafe {
+        let path = crate::config::config_dir().join("instance.lock");
+        let wide: Vec<u16> = path.to_string_lossy().encode_utf16().collect();
+        let handle = CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            (GENERIC_READ | GENERIC_WRITE).0,
+            FILE_SHARE_NONE,
+            None,
+            OPEN_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        );
+        match handle {
+            Ok(h) => {
+                // Keep the handle alive for the whole process: it is what makes
+                // the lock visible to the next copy of zя.
+                LOCK_FILE.set(h.0 as usize).ok();
+                false
+            }
+            // Only a sharing violation proves another live copy holds the file.
+            // Any other error (restricted tokens, a read-only profile folder)
+            // tells us nothing, and must not be reported as "another instance".
+            Err(_) => GetLastError() == ERROR_SHARING_VIOLATION,
+        }
+    }
+}
+
+/// Ask every *other* resident copy of zя to quit through its hidden tray window
+/// (class "ZyaTray", menu command 4 = "Выход"). Used by `zя.exe stop` and by the
+/// installer, so an old build cannot keep hooking the keyboard next to the new
+/// one. Returns how many copies were stopped.
+pub fn stop_other_instances() -> usize {
+    unsafe {
+        let class: Vec<u16> = "ZyaTray\0".encode_utf16().collect();
+        let title: Vec<u16> = "zя\0".encode_utf16().collect();
+        let mut stopped = 0;
+        for _ in 0..8 {
+            let hwnd = match FindWindowW(PCWSTR(class.as_ptr()), PCWSTR::null()) {
+                Ok(h) if !h.0.is_null() => h,
+                _ => match FindWindowW(PCWSTR::null(), PCWSTR(title.as_ptr())) {
+                    Ok(h) if !h.0.is_null() => h,
+                    _ => break,
+                },
+            };
+            if verbose() {
+                println!("zя: tray window of another instance = {:?}", hwnd);
+            }
+            if PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(4), LPARAM(0)).is_err() {
+                if verbose() {
+                    println!("zя: не удалось послать команду выхода другому экземпляру");
+                }
+                break;
+            }
+            stopped += 1;
+            std::thread::sleep(std::time::Duration::from_millis(400));
+        }
+        stopped
+    }
 }
 
 pub fn install_hook() -> anyhow::Result<()> {
@@ -1395,28 +1907,33 @@ pub fn remove_hook() {
 pub fn start_focus_guard() {
     std::thread::spawn(|| {
         let mut last_fg = unsafe { GetForegroundWindow() }.0 as usize;
+        let mut last_tick = std::time::Instant::now();
 
         loop {
             std::thread::sleep(std::time::Duration::from_millis(150));
             let fg = unsafe { GetForegroundWindow() }.0 as usize;
-            if fg == last_fg {
-                continue;
+
+            // The tray letters must always show the layout Windows is actually
+            // using, not the one we last wrote. Re-read it on every focus change
+            // and once a second while nothing changes.
+            if fg != last_fg || last_tick.elapsed() >= std::time::Duration::from_secs(1) {
+                last_tick = std::time::Instant::now();
+                let mut a = app().lock().unwrap();
+                if fg != last_fg {
+                    last_fg = fg;
+                    a.last_fg = fg;
+                    a.secret_fg = fg;
+                    a.secret = unsafe { is_secret_field() };
+                }
+                unsafe { sync_layout(&mut a) };
+                sync_tray(&a);
             }
 
-            last_fg = fg;
-            let mut a = app().lock().unwrap();
-            a.last_fg = fg;
-            a.secret_fg = fg;
-            a.secret = unsafe { is_secret_field() };
-
-            // A new foreground application starts a new text context. Anything
-            // left from the previous window must not leak into the next word.
-            a.word.clear();
-            a.run.clear();
-            a.closed = None;
-            a.identifier = false;
-            a.last_boundary = None;
-            a.last = None;
+            // The buffer itself is *not* cleared here. Dropping it on the poll
+            // tick is racy: the hook already resets it on the first keystroke of
+            // the new window (see the focus check in hook_proc), and clearing it
+            // here would eat the first letter typed after a switch — the
+            // "то работает, то не работает" symptom.
         }
     });
 }
@@ -1523,8 +2040,7 @@ pub fn add_exclude_process(name: &str) -> bool {
     }
     let lower = name.to_lowercase();
     let mut a = app().lock().unwrap();
-    if a
-        .cfg
+    if a.cfg
         .exclude_processes
         .iter()
         .any(|p| p.to_lowercase() == lower)
@@ -1540,7 +2056,9 @@ pub fn remove_exclude_process(name: &str) -> bool {
     let lower = name.to_lowercase();
     let mut a = app().lock().unwrap();
     let before = a.cfg.exclude_processes.len();
-    a.cfg.exclude_processes.retain(|p| p.to_lowercase() != lower);
+    a.cfg
+        .exclude_processes
+        .retain(|p| p.to_lowercase() != lower);
     if a.cfg.exclude_processes.len() == before {
         return false;
     }
@@ -1617,7 +2135,11 @@ pub fn add_dictionary_word(word: &str) -> bool {
     }
     let lower = letters.to_lowercase();
     let mut a = app().lock().unwrap();
-    if a.cfg.whitelist.iter().any(|w| w.eq_ignore_ascii_case(&lower)) {
+    if a.cfg
+        .whitelist
+        .iter()
+        .any(|w| w.eq_ignore_ascii_case(&lower))
+    {
         return false;
     }
     a.cfg.whitelist.push(letters);
