@@ -56,6 +56,7 @@ const DEFAULT_CONFIG: &str = r#"{
   "exclude_dirs": [],
   "auto_enabled": true,
   "autostart": true,
+  "admin_autostart": false,
   "log_enabled": true
 }
 "#;

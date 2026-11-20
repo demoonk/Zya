@@ -143,7 +143,7 @@ if (-not (Test-Path -LiteralPath $ConfigFile)) {
   "margin_unknown": 2.5,
   "margin_known": 1.0,
   "word_bonus": 20.0,
-  "plausibility": 0.0,
+  "plausibility": -12.0,
   "min_len": 3,
   "protect_code": true,
   "hotkey_undo": "alt",
@@ -157,6 +157,7 @@ if (-not (Test-Path -LiteralPath $ConfigFile)) {
   "exclude_dirs": [],
   "auto_enabled": true,
   "autostart": true,
+  "admin_autostart": false,
   "log_enabled": true
 }
 '@
