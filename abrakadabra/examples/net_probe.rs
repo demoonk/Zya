@@ -4,15 +4,20 @@ use std::ffi::c_void;
 use windows::core::PCWSTR;
 use windows::Win32::Networking::WinHttp::{
     WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpReadData,
-    WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetTimeouts,
-    WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_OPEN_REQUEST_FLAGS,
+    WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetTimeouts, WINHTTP_ACCESS_TYPE_NO_PROXY,
+    WINHTTP_FLAG_SECURE, WINHTTP_OPEN_REQUEST_FLAGS,
 };
 
 fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().collect()
+    text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-unsafe fn fetch(host: &str, path: &str, port: u16) {
+unsafe fn fetch(host: &str, path: &str, port: u16, secure: bool) {
+    let flags = if secure {
+        WINHTTP_FLAG_SECURE
+    } else {
+        WINHTTP_OPEN_REQUEST_FLAGS(0)
+    };
     let agent = wide("ZyaUpdater/1.0");
     let host_w = wide(host);
     let path_w = wide(path);
@@ -28,7 +33,7 @@ unsafe fn fetch(host: &str, path: &str, port: u16) {
         println!("connect null");
         return;
     }
-    let req = WinHttpOpenRequest(conn, PCWSTR(verb.as_ptr()), PCWSTR(path_w.as_ptr()), PCWSTR::null(), PCWSTR::null(), std::ptr::null(), WINHTTP_OPEN_REQUEST_FLAGS(0));
+    let req = WinHttpOpenRequest(conn, PCWSTR(verb.as_ptr()), PCWSTR(path_w.as_ptr()), PCWSTR::null(), PCWSTR::null(), std::ptr::null(), flags);
     if req.is_null() {
         println!("request null");
         return;
@@ -52,7 +57,8 @@ unsafe fn fetch(host: &str, path: &str, port: u16) {
 
 fn main() {
     unsafe {
-        fetch("example.com", "/", 80);
-        fetch("api.github.com", "/repos/demoonk/Zya/releases/latest", 443);
+        fetch("example.com", "/", 80, false);
+        fetch("api.github.com", "/repos/demoonk/Zya/releases/latest", 443, true);
+        fetch("github.com", "/repos/demoonk/Zya/releases/latest", 80, false);
     }
 }

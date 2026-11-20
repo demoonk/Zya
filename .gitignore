@@ -49,6 +49,7 @@ abrakadabra/tools/modal_cancel_probe.py
 abrakadabra/tools/modal_flow_probe.py
 abrakadabra/tools/modal_rules_probe.py
 abrakadabra/tools/modal_shot_probe.py
+abrakadabra/tools/update_shot.py
 abrakadabra/tools/ownerdraw_probe.py
 abrakadabra/tools/peek_rsrc.py
 abrakadabra/tools/press_combo.py

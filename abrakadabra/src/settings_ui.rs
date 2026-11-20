@@ -2330,19 +2330,33 @@ unsafe fn spawn_update_check() {
     std::thread::spawn(|| {
         let release = crate::update::check_latest();
         UPDATE_CHECKED.store(true, Ordering::Relaxed);
-        if let Some(release) = release {
-            let local = crate::update::app_version();
-            if crate::update::is_newer(&local, &release.version) {
-                let mut info = UPDATE_INFO
-                    .get_or_init(|| Mutex::new((String::new(), String::new(), 0)))
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                *info = (release.version.clone(), release.url.clone(), release.size);
-                UPDATE_AVAILABLE.store(true, Ordering::Relaxed);
+        let local = crate::update::app_version();
+        let message = match release {
+            Some(release) => {
+                if crate::update::is_newer(&local, &release.version) {
+                    let mut info = UPDATE_INFO
+                        .get_or_init(|| Mutex::new((String::new(), String::new(), 0)))
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    *info = (release.version.clone(), release.url.clone(), release.size);
+                    UPDATE_AVAILABLE.store(true, Ordering::Relaxed);
+                    format!(
+                        "Доступно обновление {}: {} ({:.1} МБ)",
+                        release.version,
+                        release.url,
+                        release.size as f64 / 1_048_576.0
+                    )
+                } else {
+                    format!("Обновлений нет: установлена {}, последняя на GitHub {}", local, release.version)
+                }
             }
-        }
+            None => "Не удалось проверить обновления: нет подключения к GitHub".into(),
+        };
         if let Some(hwnd) = MAIN_HANDLE.get() {
-            InvalidateRect(hwnd.0, std::ptr::null(), 1);
+            unsafe {
+                update_status(&message);
+                InvalidateRect(hwnd.0, std::ptr::null(), 1);
+            }
         }
     });
 }

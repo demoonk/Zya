@@ -15,7 +15,7 @@ use windows::core::PCWSTR;
 use windows::Win32::Networking::WinHttp::{
     WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpReadData,
     WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetTimeouts,
-    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_OPEN_REQUEST_FLAGS,
+    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_FLAG_SECURE,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOW;
@@ -48,7 +48,10 @@ pub fn app_version() -> String {
 }
 
 fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().collect()
+    // PCWSTR needs a terminating NUL; without it WinHTTP reads past the buffer.
+    let mut units = text.encode_utf16().collect::<Vec<u16>>();
+    units.push(0);
+    units
 }
 
 unsafe fn request_with_proxy(
@@ -92,7 +95,7 @@ unsafe fn request_with_proxy(
         PCWSTR::null(),
         PCWSTR::null(),
         std::ptr::null(),
-        WINHTTP_OPEN_REQUEST_FLAGS(0),
+        WINHTTP_FLAG_SECURE,
     );
     if request.is_null() {
         WinHttpCloseHandle(connect).ok();
@@ -224,6 +227,13 @@ pub fn run_installer(path: &PathBuf) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wide_strings_are_null_terminated() {
+        // WinHTTP reads PCWSTR until a NUL; without one it reports a bogus host.
+        assert_eq!(super::wide("GET"), vec![71, 69, 84, 0]);
+        assert_eq!(super::wide("zя"), vec![122, 0x044F, 0]);
+    }
+
     #[test]
     fn version_compare_is_numeric() {
         assert!(super::is_newer("0.1.1", "0.1.2"));
