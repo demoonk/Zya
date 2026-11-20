@@ -2,15 +2,22 @@
 //!
 //! The icon changes with the state: the code shows the layout the hook is
 //! currently tracking (`RU` = Russian, `EN` = English). Automatic switching is
-//! on when the layout code sits on the dark plate alone, off when a red slash
-//! crosses it. The letters are white *on a solid dark plate* - white glyphs on
-//! a transparent background were invisible on a light Windows taskbar.
+//! on when the layout code is clean, off when a red slash crosses it.
+//! The letters are drawn directly into a transparent icon resource:
+//! white text in dark theme, black text in light theme, without a colored plate.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    CreateCompatibleDC, CreateDIBSection, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject,
+    DrawTextW, FillRect, GetDC, GetTextExtentPoint32W, LineTo, MoveToEx, ReleaseDC, SelectObject,
+    SetBkColor, SetBkMode, SetTextColor, BITMAPINFO, BITMAPINFOHEADER, CLIP_DEFAULT_PRECIS,
+    DEFAULT_CHARSET, DEFAULT_QUALITY, DIB_RGB_COLORS, DT_CENTER, DT_SINGLELINE, DT_VCENTER,
+    FF_MODERN, HGDIOBJ, OPAQUE, OUT_DEFAULT_PRECIS, PS_SOLID,
+};
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
     NOTIFYICONDATAW,
@@ -36,13 +43,193 @@ const CMD_AUTOSTART: usize = 2;
 const CMD_SETTINGS: usize = 3;
 const CMD_QUIT: usize = 4;
 
-// Complete ICONREF blocks: BITMAPINFOHEADER + bottom-up 32bpp BGRA + 1bpp AND
-// mask. Handing CreateIcon a naked BGRA buffer produced a blue, vertically
-// mirrored glyph in the notification area, so we ship the real icon resources.
-const DIB_RU_ON: &[u8] = include_bytes!("../data/tray_ru_on.dib");
-const DIB_EN_ON: &[u8] = include_bytes!("../data/tray_en_on.dib");
-const DIB_RU_OFF: &[u8] = include_bytes!("../data/tray_ru_off.dib");
-const DIB_EN_OFF: &[u8] = include_bytes!("../data/tray_en_off.dib");
+const ICON_SIZE: i32 = 32;
+const MASK_BYTES: usize = ICON_SIZE as usize * 4;
+const BITS_BYTES: usize = ICON_SIZE as usize * ICON_SIZE as usize * 4;
+
+fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
+    COLORREF(((b as u32) << 16) | ((g as u32) << 8) | r as u32)
+}
+
+/// Draw a 32x32 transparent icon: layout letters only, no solid background plate.
+/// Dark theme uses white letters; light theme uses black letters. Auto-off gets a
+/// red slash, but the background stays transparent.
+unsafe fn tray_icon_resource(is_ru: bool, auto: bool, dark: bool) -> Vec<u8> {
+    let label = if is_ru { "RU" } else { "EN" };
+
+    let screen_dc = GetDC(None);
+    let mem_dc = CreateCompatibleDC(Some(screen_dc));
+
+    let bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: 40,
+            biWidth: ICON_SIZE,
+            biHeight: -ICON_SIZE,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: 0,
+            biSizeImage: BITS_BYTES as u32,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+    let Ok(bitmap) = CreateDIBSection(Some(screen_dc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
+    else {
+        ReleaseDC(None, screen_dc);
+        return Vec::new();
+    };
+    if bitmap.0.is_null() || bits.is_null() {
+        ReleaseDC(None, screen_dc);
+        return Vec::new();
+    }
+
+    let _ = SelectObject(mem_dc, HGDIOBJ(bitmap.0));
+
+    // Pick the biggest Segoe UI glyph that still fits the 32x32 icon: the letters
+    // are as wide as the tray icon allows, leaving a one-pixel margin on each side.
+    let text = wide(label);
+    let mut glyph_font = HGDIOBJ(std::ptr::null_mut());
+    for height in (10..=ICON_SIZE).rev() {
+        let candidate = CreateFontW(
+            height,
+            0,
+            0,
+            0,
+            700,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            DEFAULT_QUALITY,
+            FF_MODERN.0 as u32,
+            PCWSTR(wide("Segoe UI").as_ptr()),
+        );
+        let _ = SelectObject(mem_dc, HGDIOBJ(candidate.0));
+        let mut extent = SIZE { cx: 0, cy: 0 };
+        let _ = GetTextExtentPoint32W(mem_dc, &text[..text.len() - 1], &mut extent);
+        if extent.cx <= ICON_SIZE - 2 && extent.cy <= ICON_SIZE - 2 {
+            glyph_font = HGDIOBJ(candidate.0);
+            break;
+        }
+        let _ = DeleteObject(HGDIOBJ(candidate.0));
+    }
+    if glyph_font.0.is_null() {
+        ReleaseDC(None, screen_dc);
+        return Vec::new();
+    }
+    let _ = SelectObject(mem_dc, glyph_font);
+
+    // The plate is painted white only so that every non-white pixel can be read
+    // back as "glyph or slash" when the mask is built. The final icon has no
+    // background: the mask makes the plate fully transparent.
+    let background = RECT {
+        left: 0,
+        top: 0,
+        right: ICON_SIZE,
+        bottom: ICON_SIZE,
+    };
+    let _ = FillRect(mem_dc, &background, CreateSolidBrush(rgb(255, 255, 255)));
+    let _ = SetBkColor(mem_dc, rgb(255, 255, 255));
+    let _ = SetTextColor(mem_dc, rgb(0, 0, 0));
+    let _ = SetBkMode(mem_dc, OPAQUE);
+
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: ICON_SIZE,
+        bottom: ICON_SIZE,
+    };
+    let mut glyphs = text.clone();
+    DrawTextW(
+        mem_dc,
+        glyphs.as_mut_slice(),
+        &mut rect,
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+    );
+
+    if !auto {
+        let pen = CreatePen(PS_SOLID, 3, rgb(220, 0, 0));
+        let _ = SelectObject(mem_dc, HGDIOBJ(pen.0));
+        let _ = MoveToEx(mem_dc, 5, 27, None);
+        let _ = LineTo(mem_dc, 27, 5);
+    }
+
+    let pixels = bits as *const u32;
+    let mut data = Vec::new();
+    data.extend(&40u32.to_le_bytes());
+    data.extend(&(ICON_SIZE as u32).to_le_bytes());
+    data.extend(&(ICON_SIZE as u32).to_le_bytes());
+    data.extend(&1u16.to_le_bytes());
+    data.extend(&32u16.to_le_bytes());
+    data.extend(&0u32.to_le_bytes());
+    data.extend(&(BITS_BYTES as u32).to_le_bytes());
+    data.extend(&0i32.to_le_bytes());
+    data.extend(&0i32.to_le_bytes());
+    data.extend(&0u32.to_le_bytes());
+    data.extend(&0u32.to_le_bytes());
+    data.resize(40 + BITS_BYTES + MASK_BYTES, 0);
+
+    for y in 0..ICON_SIZE {
+        let bottom_row = (ICON_SIZE - 1 - y) as usize;
+        for x in 0..ICON_SIZE {
+            let px = unsafe { *pixels.add((y * ICON_SIZE + x) as usize) };
+            let r = ((px >> 16) & 0xff) as u8;
+            let g = ((px >> 8) & 0xff) as u8;
+            let b = (px & 0xff) as u8;
+
+            // Anything that is not white-ish belongs to the glyph or slash.
+            let opaque = !(r >= 220 && g >= 220 && b >= 220);
+            if !opaque {
+                continue;
+            }
+
+            let (cr, cg, cb) = if r > 150 && g < 90 && b < 90 {
+                // red slash
+                (220, 0, 0)
+            } else if dark {
+                (255, 255, 255)
+            } else {
+                (0, 0, 0)
+            };
+
+            let off = 40 + bottom_row * (ICON_SIZE as usize * 4) + x as usize * 4;
+            data[off] = cb;
+            data[off + 1] = cg;
+            data[off + 2] = cr;
+            data[off + 3] = 255;
+
+            let mask_byte = 40 + BITS_BYTES + bottom_row * 4 + (x as usize / 8);
+            data[mask_byte] |= 1 << (7 - (x as usize % 8));
+        }
+    }
+
+    ReleaseDC(None, screen_dc);
+    data
+}
+
+unsafe fn create_tray_icon(is_ru: bool, auto: bool, dark: bool) -> HICON {
+    let data = tray_icon_resource(is_ru, auto, dark);
+    if data.is_empty() {
+        return HICON(std::ptr::null_mut());
+    }
+    CreateIconFromResourceEx(
+        &data,
+        true,
+        0x0003_0000,
+        ICON_SIZE,
+        ICON_SIZE,
+        IMAGE_FLAGS(0),
+    )
+    .unwrap_or(HICON(std::ptr::null_mut()))
+}
+
+fn icon_for(is_ru: bool, auto: bool) -> HICON {
+    unsafe { create_tray_icon(is_ru, auto, crate::theme::is_dark()) }
+}
 
 /// (russian layout, auto on) -> index into the icon table.
 fn variant(is_ru: bool, auto: bool) -> usize {
@@ -52,25 +239,6 @@ fn variant(is_ru: bool, auto: bool) -> usize {
         (true, false) => 2,
         (false, false) => 3,
     }
-}
-
-fn icons() -> [HICON; 4] {
-    static CACHE: OnceLock<[usize; 4]> = OnceLock::new();
-    let table = CACHE.get_or_init(|| {
-        let mut out = [0usize; 4];
-        for (slot, dib) in out
-            .iter_mut()
-            .zip([DIB_RU_ON, DIB_EN_ON, DIB_RU_OFF, DIB_EN_OFF])
-        {
-            *slot = unsafe {
-                CreateIconFromResourceEx(dib, true, 0x0003_0000, 32, 32, IMAGE_FLAGS(0))
-                    .map(|h| h.0 as usize)
-                    .unwrap_or(0)
-            };
-        }
-        out
-    });
-    table.map(|v| HICON(v as *mut std::ffi::c_void))
 }
 
 static TRAY_HWND: OnceLock<usize> = OnceLock::new();
@@ -104,7 +272,7 @@ unsafe fn notify(hwnd: HWND, is_ru: bool, auto: bool, add: bool) -> bool {
         uID: 1,
         uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
         uCallbackMessage: WM_TRAYICON,
-        hIcon: icons()[variant(is_ru, auto)],
+        hIcon: icon_for(is_ru, auto),
         ..Default::default()
     };
     let t = tip(is_ru, auto);
@@ -286,7 +454,9 @@ unsafe fn show_menu(hwnd: HWND) {
             let exe = crate::autostart::toggle();
             println!("zя: автозапуск {}", exe);
         }
-        CMD_SETTINGS => crate::settings::open(),
+        CMD_SETTINGS => {
+            let _ = crate::settings::open();
+        }
         CMD_QUIT => {
             detach(hwnd);
             crate::win::remove_hook();
@@ -310,7 +480,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     println!("zя: автозапуск {}", exe);
                 }
                 CMD_SETTINGS => {
-                    crate::settings::open();
+                    let _ = crate::settings::open();
                 }
                 CMD_QUIT => {
                     detach(hwnd);
@@ -419,74 +589,111 @@ mod tests {
     use super::*;
 
     #[test]
-    fn variant_indexes_are_distinct() {
-        assert_eq!(variant(true, true), 0);
+    fn tray_icons_are_transparent_and_use_theme_text_color() {
+        for dark in [true, false] {
+            let data = unsafe { tray_icon_resource(true, true, dark) };
+            assert_eq!(data.len(), 40 + BITS_BYTES + MASK_BYTES);
+
+            let xor = &data[40..40 + BITS_BYTES];
+            let mask = &data[40 + BITS_BYTES..];
+
+            // The top-left corner must remain transparent.
+            assert_eq!(xor[31 * 128 + 3], 0, "tray background is not transparent");
+
+            // Some glyph pixels are opaque, and their color follows the theme.
+            let expected = if dark { (255, 255, 255) } else { (0, 0, 0) };
+            let has_expected_glyph = (0..xor.len() / 4).any(|i| {
+                let pixel = &xor[i * 4..i * 4 + 4];
+                let row = i / 32;
+                let col = i % 32;
+                let opaque = mask[row * 4 + col / 8] & (1 << (7 - col % 8)) != 0;
+                opaque
+                    && pixel[3] == 255
+                    && pixel[0] == expected.2
+                    && pixel[1] == expected.1
+                    && pixel[2] == expected.0
+            });
+            assert!(
+                has_expected_glyph,
+                "tray glyph is not {expected:?} in {dark} theme"
+            );
+        }
+    }
+
+    #[test]
+    fn tray_previews_can_be_written_for_inspection() {
+        if std::env::var("ZYA_TRAY_PREVIEW").is_err() {
+            return;
+        }
+        for (name, ru, auto, dark) in [
+            ("tray_ru_on_dark", true, true, true),
+            ("tray_ru_on_light", true, true, false),
+            ("tray_en_on_dark", false, true, true),
+            ("tray_en_on_light", false, true, false),
+        ] {
+            let data = unsafe { tray_icon_resource(ru, auto, dark) };
+            let xor = &data[40..40 + BITS_BYTES];
+            let mask = &data[40 + BITS_BYTES..];
+            let mut bmp = Vec::new();
+            bmp.extend(&40u32.to_le_bytes());
+            bmp.extend(&(ICON_SIZE as u32).to_le_bytes());
+            bmp.extend(&(ICON_SIZE as u32).to_le_bytes());
+            bmp.extend(&1u16.to_le_bytes());
+            bmp.extend(&24u16.to_le_bytes());
+            bmp.extend(&0u32.to_le_bytes());
+            bmp.extend(&((ICON_SIZE * ICON_SIZE * 3) as u32).to_le_bytes());
+            bmp.extend(&0i32.to_le_bytes());
+            bmp.extend(&0i32.to_le_bytes());
+            bmp.extend(&0u32.to_le_bytes());
+            bmp.extend(&0u32.to_le_bytes());
+            // Both the icon bits and the BMP rows are stored bottom-up.
+            for row in 0..ICON_SIZE {
+                for col in 0..ICON_SIZE {
+                    let index = (row as usize) * ICON_SIZE as usize + col as usize;
+                    let opaque = mask[row as usize * 4 + col as usize / 8] & (1 << (7 - col as usize % 8)) != 0;
+                    if opaque {
+                        bmp.extend(&[xor[index * 4 + 2], xor[index * 4 + 1], xor[index * 4]]);
+                    } else if dark {
+                        bmp.extend(&[0x19, 0x15, 0x12]);
+                    } else {
+                        bmp.extend(&[0xF7, 0xF5, 0xF3]);
+                    }
+                }
+            }
+            std::fs::write(format!("data/check/{name}.bmp"), bmp)
+                .expect("preview written");
+        }
+    }
+
+    #[test]
+    fn tray_glyph_spans_the_icon_width() {
+        for label_ru in [true, false] {
+            let data = unsafe { tray_icon_resource(label_ru, true, true) };
+            let mask = &data[40 + BITS_BYTES..];
+            let mut min_col = ICON_SIZE;
+            let mut max_col = -1;
+            for row in 0..ICON_SIZE {
+                for col in 0..ICON_SIZE {
+                    if mask[row as usize * 4 + (col as usize / 8)] & (1 << (7 - col as usize % 8)) != 0 {
+                        if col < min_col {
+                            min_col = col;
+                        }
+                        if col > max_col {
+                            max_col = col;
+                        }
+                    }
+                }
+            }
+            let width = max_col - min_col + 1;
+            assert!(width >= 22, "glyph only {width} px wide in a 32 px icon");
+        }
+    }
+
+    #[test]
+    fn variant_indexes_are_distinct() {        assert_eq!(variant(true, true), 0);
         assert_eq!(variant(false, true), 1);
         assert_eq!(variant(true, false), 2);
         assert_eq!(variant(false, false), 3);
-    }
-
-    #[test]
-    fn icon_data_is_32x32_bgra() {
-        for dib in [DIB_RU_ON, DIB_EN_ON, DIB_RU_OFF, DIB_EN_OFF] {
-            // 40-byte BITMAPINFOHEADER + 32*32*4 XOR bitmap + 32*4 AND mask.
-            assert_eq!(dib.len(), 40 + 32 * 32 * 4 + 32 * 4);
-            let height = i32::from_le_bytes([dib[8], dib[9], dib[10], dib[11]]);
-            assert_eq!(
-                height, 64,
-                "biHeight must cover the XOR bitmap and the mask"
-            );
-        }
-    }
-
-    /// A null HICON makes Shell_NotifyIcon drop the icon from the notification
-    /// area, which is exactly what the "the tray icon blinks" report looked like.
-    #[test]
-    fn every_variant_icon_is_created() {
-        for (i, h) in icons().iter().enumerate() {
-            assert!(!h.0.is_null(), "icon variant {i} was not created");
-        }
-    }
-
-    /// The glyph has to survive a *light* taskbar, so it must sit on an opaque
-    /// dark plate instead of a transparent background.
-    #[test]
-    fn every_icon_has_an_opaque_dark_plate_and_a_white_glyph() {
-        for (name, dib) in [
-            ("ru_on", DIB_RU_ON),
-            ("en_on", DIB_EN_ON),
-            ("ru_off", DIB_RU_OFF),
-            ("en_off", DIB_EN_OFF),
-        ] {
-            let width = i32::from_le_bytes([dib[4], dib[5], dib[6], dib[7]]);
-            let planes = u16::from_le_bytes([dib[12], dib[13]]);
-            let bpp = u16::from_le_bytes([dib[14], dib[15]]);
-            assert_eq!((width, planes, bpp), (32, 1, 32), "{name} header");
-
-            let xor = &dib[40..40 + 32 * 32 * 4];
-            // Pixels in the middle band of the icon: the plate, fully opaque.
-            for y in 8..24 {
-                let i = (31 - y) * 128 + 2 * 4;
-                let (b, g, r, a) = (xor[i], xor[i + 1], xor[i + 2], xor[i + 3]);
-                assert_eq!(a, 255, "{name}: plate pixel at y={y} is transparent");
-                assert!(
-                    r < 130 && g < 150 && b < 170,
-                    "{name}: plate is not dark: r={r} g={g} b={b}"
-                );
-            }
-            // And the letters are really drawn on top of it.
-            assert!(
-                xor.chunks(4)
-                    .any(|p| p[3] == 255 && p[0] > 190 && p[1] > 190 && p[2] > 190),
-                "{name}: no white glyph pixels"
-            );
-
-            // AND mask: 128 bytes, and the rows covered by the plate are opaque.
-            let mask = &dib[40 + 32 * 32 * 4..];
-            assert_eq!(mask.len(), 32 * 4, "{name}: mask size");
-            assert_eq!(mask[16 * 4], 0xff, "{name}: middle mask row not opaque");
-            assert_eq!(mask[16 * 4 + 1], 0xff, "{name}: middle mask row not opaque");
-        }
     }
 
     #[test]

@@ -14,6 +14,16 @@ verbose_*.txt
 tg_*.bmp
 tg_*.png
 
+# Scratch logs produced while debugging locally
+/*.txt
+abrakadabra/build_*.txt
+abrakadabra/check_errors*.txt
+abrakadabra/e*.txt
+abrakadabra/out_*.txt
+abrakadabra/_static_check/
+abrakadabra/_old_settings.rs
+abrakadabra/data/check/
+
 # Python artifacts
 __pycache__/
 *.pyc

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Regenerate the tray icons for ZЯ.
+"""Legacy helper: draw reference tray icons and the app icon by hand.
+
+This script is NOT part of the build. The tray icon the app actually shows is
+built at runtime by `src/tray.rs` (GDI text glyph + AND mask, theme-aware
+white/black text), and the application icon comes from `data/app.ico`. The
+files written here are only visual references kept in `data/`.
 
 The tray icon is deliberately tiny, so the glyph is drawn as large as possible
 in the 32x32 notification-area icon. The background is transparent. On states
@@ -11,7 +16,7 @@ Outputs:
   data/app.ico
 
 CreateIconFromResourceEx expects an ICONREF block:
-  BITMAPINFOHEADER (biHeight = 2 * icon height) + bottom-up 32bpp RGBA + 1bpp AND mask.
+  BITMAPINFOHEADER (biHeight = 2 * icon height) + bottom-up 32bpp BGRA + 1bpp AND mask.
 """
 import os
 import struct
@@ -97,11 +102,12 @@ def dib(img):
     px = img.load()
     out = bytearray(struct.pack("<IiiHHIIiiII", 40, w, 2 * h, 1, 32, 0, 0, 0, 0, 0, 0))
 
-    # Bottom-up XOR bitmap. Windows icon resources read this as RGBA, not BGRA.
+    # Bottom-up XOR bitmap. A DIB stores pixels as BGRA: writing them in RGBA
+    # order swaps red and blue, which turned the red "Я" into a blue one.
     for y in range(h - 1, -1, -1):
         for x in range(w):
             r, g, b, a = px[x, y]
-            out += bytes((r, g, b, a))
+            out += bytes((b, g, r, a))
 
     stride = (w + 7) // 8
     for y in range(h - 1, -1, -1):

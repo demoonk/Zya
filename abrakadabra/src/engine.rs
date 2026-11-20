@@ -68,6 +68,9 @@ pub struct Config {
     pub auto_enabled: bool,
     /// Register the executable in the Windows "Run" key at start-up.
     pub autostart: bool,
+    /// Use Task Scheduler instead of the Run key; the task is created with highest
+    /// privileges so zя can hook the keyboard even under elevated UAC limits.
+    pub admin_autostart: bool,
     pub log_enabled: bool,
     /// Hotkey that undoes the last correction. "alt" keeps the classic behaviour;
     /// anything else ("f2", "ctrl+alt+z") triggers on key-down.
@@ -143,6 +146,7 @@ impl Default for Config {
             exclude_dirs: vec![],
             auto_enabled: true,
             autostart: false,
+            admin_autostart: false,
             log_enabled: true,
         }
     }

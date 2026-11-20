@@ -52,6 +52,7 @@ pub struct Entry {
 
 static RECENT: OnceLock<Mutex<Vec<Entry>>> = OnceLock::new();
 
+#[allow(dead_code)]
 pub fn recent() -> Vec<Entry> {
     RECENT
         .get_or_init(|| Mutex::new(Vec::new()))
@@ -69,11 +70,15 @@ pub fn clear_recent() {
 /// the current process, so the settings "Лог" tab would be empty after a fresh
 /// start even though the diary has hundreds of lines.
 pub fn tail(limit: usize) -> Vec<Entry> {
-    let text = match std::fs::read_to_string(log_path()) {
+    let mut text = match std::fs::read_to_string(log_path()) {
         Ok(text) => text,
         Err(_) => return Vec::new(),
     };
-    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    // Notepad writes a BOM; without stripping it the "[..]" index below lands
+    // inside the three-byte marker and panics.
+    if text.starts_with('\u{feff}') {
+        text = text.trim_start_matches('\u{feff}').to_string();
+    }    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     let start = lines.len().saturating_sub(limit);
     lines[start..]
         .iter()
@@ -83,6 +88,9 @@ pub fn tail(limit: usize) -> Vec<Entry> {
 
 fn parse_line(line: &str) -> Option<Entry> {
     // "[09:42:12 UTC] #35 тщеузфв -> notepad | вручную: смена раскладки"
+    if !line.starts_with('[') {
+        return None;
+    }
     let close = line.find(']')?;
     let time = line[1..close].trim().to_string();
     let rest = line[close + 1..].trim();
@@ -161,6 +169,11 @@ mod tests {
         assert_eq!(entry.original, "тщеузфв");
         assert_eq!(entry.converted, "notepad");
         assert_eq!(entry.why, "вручную: смена раскладки");
+    }
+
+    #[test]
+    fn a_line_without_a_bracket_is_skipped() {
+        assert!(parse_line("ghbdtn -> привет").is_none());
     }
 
     #[test]

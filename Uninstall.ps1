@@ -5,9 +5,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$installDir = Join-Path $env:APPDATA 'Abrakadra'
-$configDir = Join-Path $env:APPDATA 'zя'
+$installDir = Join-Path $env:APPDATA 'zя'
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$taskName = 'ZyaAutoStart'
 $oldNames = @(
     'z.exe',
     'zя',
@@ -28,7 +28,7 @@ if ($DryRun) {
 }
 
 Get-Process |
-    Where-Object { $_.Path -and ($_.Path -like "$installDir*" -or $_.Path -like "$configDir*") } |
+    Where-Object { $_.Path -and $_.Path -like "$installDir*" } |
     ForEach-Object {
         try {
             Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
@@ -48,10 +48,17 @@ foreach ($value in $oldNames) {
     }
 }
 
-Remove-Item -LiteralPath $installDir -Recurse -Force -ErrorAction SilentlyContinue
+try {
+    schtasks /delete /tn $taskName /f | Out-Null
+} catch {
+}
 
-if (-not $KeepSettings) {
-    Remove-Item -LiteralPath $configDir -Recurse -Force -ErrorAction SilentlyContinue
+if ($KeepSettings) {
+    Get-ChildItem -LiteralPath $installDir -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notlike '*.json' -and $_.Name -notlike '*.log' } |
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+} else {
+    Remove-Item -LiteralPath $installDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host 'zя uninstalled.'

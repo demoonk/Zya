@@ -42,6 +42,8 @@ pub struct FileConfig {
     pub auto_enabled: bool,
     #[serde(default)]
     pub autostart: bool,
+    #[serde(default)]
+    pub admin_autostart: bool,
     #[serde(default = "default_true")]
     pub log_enabled: bool,
 }
@@ -103,6 +105,7 @@ impl From<&Config> for FileConfig {
             exclude_dirs: c.exclude_dirs.clone(),
             auto_enabled: c.auto_enabled,
             autostart: c.autostart,
+            admin_autostart: c.admin_autostart,
             log_enabled: c.log_enabled,
         }
     }
@@ -183,6 +186,7 @@ pub fn load() -> Config {
                     exclude_dirs: f.exclude_dirs,
                     auto_enabled: f.auto_enabled,
                     autostart: f.autostart,
+                    admin_autostart: f.admin_autostart,
                     log_enabled: f.log_enabled,
                 },
                 Err(e) => {

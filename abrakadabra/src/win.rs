@@ -177,6 +177,11 @@ pub struct App {
     /// after a real Alt+Shift switch), so we seed it from the OS when the
     /// foreground window changes and then track every Alt+Shift that happens.
     lang: u32,
+    /// Layout we just requested with an injected Alt+Shift, before the OS has
+    /// confirmed it. This prevents `sync_layout()` from immediately overwriting
+    /// our intended target with the still-stale focused-control value.
+    pending_target: Option<u32>,
+    pending_at: std::time::Instant,
     /// Last layout reported by the focused-control probe, used only to print the
     /// diagnostic line once per change.
     lang_debug: u32,
@@ -248,6 +253,47 @@ pub fn event_count() -> i64 {
     EVENTS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+pub fn reload_hotkeys(cfg: &Config) {
+    let Some(app) = APP.get() else {
+        return;
+    };
+    let Some(mut a) = app.lock().ok() else {
+        return;
+    };
+    a.cfg = cfg.clone();
+    a.engine.cfg = cfg.clone();
+    a.auto = cfg.auto_enabled;
+    a.hotkey_undo = parse_hotkey(&cfg.hotkey_undo).unwrap_or(Hotkey {
+        alt: true,
+        vk: VK_LMENU.0,
+        ..Default::default()
+    });
+    a.hotkey_toggle = parse_hotkey(&cfg.hotkey_toggle).unwrap_or(Hotkey {
+        ctrl: true,
+        alt: true,
+        vk: VK_P.0,
+        ..Default::default()
+    });
+    a.hotkey_last = parse_hotkey(&cfg.hotkey_last).unwrap_or(Hotkey {
+        vk: VK_PAUSE.0,
+        ..Default::default()
+    });
+    a.hotkey_selection = parse_hotkey(&cfg.hotkey_selection).unwrap_or(Hotkey {
+        vk: VK_PAUSE.0,
+        ..Default::default()
+    });
+    a.hotkey_upper = parse_hotkey(&cfg.hotkey_upper).unwrap_or(Hotkey {
+        ctrl: true,
+        vk: VK_PAUSE.0,
+        ..Default::default()
+    });
+    a.hotkey_invert = parse_hotkey(&cfg.hotkey_invert).unwrap_or(Hotkey {
+        shift: true,
+        vk: VK_PAUSE.0,
+        ..Default::default()
+    });
+}
+
 /// True when a keystroke injected by *another* zя process has been seen: two
 /// copies are hooking the keyboard at the same time.
 pub fn foreign_instance_seen() -> bool {
@@ -300,6 +346,8 @@ fn app() -> &'static Mutex<App> {
             switches: 0,
             lang: EN_LANGID,
             lang_debug: 0,
+            pending_target: None,
+            pending_at: std::time::Instant::now(),
             last_fg: 0,
             word_window: 0,
             alt_down: false,
@@ -573,7 +621,33 @@ pub fn foreground_window_matches(hwnd: HWND) -> bool {
 /// The root window is queried only as a fallback (its thread can report a stale
 /// layout, which is why Notepad and Teams used to be "blind"). The tracked value
 /// is kept only as a last resort when both queries fail.
+unsafe fn mark_pending_layout(a: &mut App, target: u32) {
+    a.pending_target = Some(target);
+    a.pending_at = std::time::Instant::now();
+}
+
 unsafe fn sync_layout(a: &mut App) {
+    // A flip we just injected can lag behind GetKeyboardLayout: the OS has not
+    // yet applied the new layout to the focused thread. Keep the intended target
+    // for a short window instead of trusting the stale probe and undoing it.
+    if let Some(target) = a.pending_target {
+        if a.pending_at.elapsed() < std::time::Duration::from_millis(900) {
+            let site = focused_langid_in(a);
+            let root = langid_of(foreground_hkl());
+            if site == target || root == target {
+                a.lang = target;
+                a.pending_target = None;
+                return;
+            }
+            if a.lang == target {
+                return;
+            }
+            a.pending_target = None;
+        } else {
+            a.pending_target = None;
+        }
+    }
+
     let lid = focused_langid_in(a);
     if lid == RU_LANGID || lid == EN_LANGID {
         a.lang = lid;
@@ -609,7 +683,9 @@ unsafe fn flip_tracked(a: &mut App) {
     // later, which keeps the tracked layout in step with the real one.
     sync_layout(a);
     if a.lang == RU_LANGID || a.lang == EN_LANGID {
-        a.lang = other_layout(a.lang);
+        let target = other_layout(a.lang);
+        a.lang = target;
+        mark_pending_layout(a, target);
     }
     sync_tray(a);
 }
@@ -1098,7 +1174,8 @@ unsafe fn selection_gesture(op: SelOp, lang: u32, prefer_token: bool) {
     let mut a = app().lock().unwrap();
     // A selection gesture is a replacement too: it belongs in the diary and in
     // the switch counter, otherwise the log looks empty while Break works.
-    if before != text {
+    let changed = before != text;
+    if changed {
         a.switches += 1;
         let why = match op {
             SelOp::SwapLayout => "вручную: смена раскладки выделения",
@@ -1121,8 +1198,18 @@ unsafe fn selection_gesture(op: SelOp, lang: u32, prefer_token: bool) {
             a.switches,
         );
     }
-    if op == SelOp::SwapLayout {
-        a.lang = other_layout(lang);
+    if op == SelOp::SwapLayout && changed {
+        let has_cyrillic = text.chars().any(crate::layout::is_cyrillic);
+        let has_latin = text.chars().any(crate::layout::is_latin);
+        let target = if has_cyrillic && !has_latin {
+            RU_LANGID
+        } else if has_latin && !has_cyrillic {
+            EN_LANGID
+        } else {
+            other_layout(lang)
+        };
+        a.lang = target;
+        mark_pending_layout(&mut a, target);
     }
     a.word.clear();
     a.run.clear();
@@ -1164,8 +1251,18 @@ fn swap_last_token(a: &mut App) {
         crate::engine::TargetLayout::English
     };
     let delete = token.chars().count() + boundary.map_or(0, |_| 1);
-    unsafe { rewrite(delete, &mirrored, boundary, true) };
-    a.lang = other_layout(a.lang);
+    let expected_events =
+        (token.chars().count() * 2 + mirrored.chars().count() * 2 + boundary.map_or(0, |_| 2) + 4)
+            as u32;
+    let n = unsafe { rewrite(delete, &mirrored, boundary, true) };
+    if n >= expected_events {
+        let target_lid = match target {
+            crate::engine::TargetLayout::Russian => RU_LANGID,
+            crate::engine::TargetLayout::English => EN_LANGID,
+        };
+        a.lang = target_lid;
+        unsafe { mark_pending_layout(a, target_lid) };
+    }
     a.word.clear();
     a.run.clear();
     a.closed = Some((mirrored.clone(), boundary));
@@ -1240,7 +1337,13 @@ fn undo_last(a: &mut App, deferred: bool) {
     let original = d.original.clone();
     let flip = d.flip;
     if flip {
-        a.lang = other_layout(a.lang);
+        let original_lid = if original.chars().any(crate::layout::is_cyrillic) {
+            RU_LANGID
+        } else {
+            EN_LANGID
+        };
+        a.lang = original_lid;
+        unsafe { mark_pending_layout(a, original_lid) };
     }
     sync_tray(a);
     a.last = None;
@@ -1338,8 +1441,19 @@ unsafe fn decide_word_on_boundary(a: &mut App, word: &str, c: char) -> bool {
                 crate::engine::TargetLayout::Russian => RU_LANGID,
                 crate::engine::TargetLayout::English => EN_LANGID,
             };
-            let need_flip = d.flip && current_langid() != target_lid;
+
+            // The layout that actually receives the keystroke is the layout of the
+            // focused input control, not necessarily the root foreground window.
+            // Chromium/Electron/Notepad have the text control on another thread,
+            // so GetKeyboardLayout(GetForegroundWindow()) can remain stale and
+            // make us skip a needed Alt+Shift.
+            sync_layout(a);
+            let need_flip = d.flip && a.lang != target_lid;
             let boundary = boundary_to_write(c, need_flip);
+            let expected_events = (d.original.chars().count() * 2
+                + d.converted.chars().count() * 2
+                + if swallow { 2 } else { 0 }
+                + if need_flip { 4 } else { 0 }) as u32;
             let n = rewrite(
                 d.original.chars().count(),
                 &d.converted,
@@ -1350,8 +1464,9 @@ unsafe fn decide_word_on_boundary(a: &mut App, word: &str, c: char) -> bool {
                 println!("   rewrite injected {n} events");
             }
 
-            if need_flip {
+            if need_flip && n >= expected_events {
                 a.lang = target_lid;
+                mark_pending_layout(a, target_lid);
             }
             sync_tray(a);
             a.word.clear();
@@ -1467,7 +1582,12 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
                 }
                 // The chord is only a language switch when it is released with
                 // no other key pressed in between.
-                if (is_shift || is_alt) && a.alt_shift_pending && !a.alt_down && !a.shift_down {
+                if (is_shift || is_alt)
+                    && a.alt_shift_pending
+                    && !a.alt_down
+                    && !a.shift_down
+                    && !crate::settings_ui::is_assign_open()
+                {
                     a.alt_shift_pending = false;
                     flip_tracked(&mut a);
                 }
@@ -1498,6 +1618,13 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         }
         (a.win_down, a.ctrl_down, a.alt_down, a.shift_down)
     };
+
+    // While the hotkey assignment modal is open, the settings UI owns the keys.
+    // Do not run layout/word rewrite here, otherwise the modal and the main hook
+    // react to the same press at once.
+    if crate::settings_ui::is_assign_open() {
+        return CallNextHookEx(None, code, wparam, lparam);
+    }
 
     // Win+Space cycles the input language through the OS. Re-seed the tracked
     // layout so the hook does not drift out of sync.
@@ -2030,14 +2157,17 @@ pub fn set_exclude_dirs(list: &[String]) {
     a.cfg.exclude_dirs = list.to_vec();
 }
 
+#[allow(dead_code)]
 pub fn exclude_processes() -> Vec<String> {
     app().lock().unwrap().cfg.exclude_processes.clone()
 }
 
+#[allow(dead_code)]
 pub fn exclude_dirs() -> Vec<String> {
     app().lock().unwrap().cfg.exclude_dirs.clone()
 }
 
+#[allow(dead_code)]
 pub fn add_exclude_process(name: &str) -> bool {
     let name = name.trim();
     if name.is_empty() {
@@ -2053,10 +2183,13 @@ pub fn add_exclude_process(name: &str) -> bool {
         return false;
     }
     a.cfg.exclude_processes.push(name.to_string());
-    crate::config::save(&a.cfg).ok();
+    if let Err(error) = crate::config::save(&a.cfg) {
+        println!("zя: не удалось сохранить настройки: {error}");
+    }
     true
 }
 
+#[allow(dead_code)]
 pub fn remove_exclude_process(name: &str) -> bool {
     let lower = name.to_lowercase();
     let mut a = app().lock().unwrap();
@@ -2067,10 +2200,13 @@ pub fn remove_exclude_process(name: &str) -> bool {
     if a.cfg.exclude_processes.len() == before {
         return false;
     }
-    crate::config::save(&a.cfg).ok();
+    if let Err(error) = crate::config::save(&a.cfg) {
+        println!("zя: не удалось сохранить настройки: {error}");
+    }
     true
 }
 
+#[allow(dead_code)]
 pub fn add_exclude_dir(dir: &str) -> bool {
     let dir = dir.trim();
     if dir.is_empty() {
@@ -2082,10 +2218,13 @@ pub fn add_exclude_dir(dir: &str) -> bool {
         return false;
     }
     a.cfg.exclude_dirs.push(dir.to_string());
-    crate::config::save(&a.cfg).ok();
+    if let Err(error) = crate::config::save(&a.cfg) {
+        println!("zя: не удалось сохранить настройки: {error}");
+    }
     true
 }
 
+#[allow(dead_code)]
 pub fn remove_exclude_dir(dir: &str) -> bool {
     let lower = dir.to_lowercase();
     let mut a = app().lock().unwrap();
@@ -2094,11 +2233,14 @@ pub fn remove_exclude_dir(dir: &str) -> bool {
     if a.cfg.exclude_dirs.len() == before {
         return false;
     }
-    crate::config::save(&a.cfg).ok();
+    if let Err(error) = crate::config::save(&a.cfg) {
+        println!("zя: не удалось сохранить настройки: {error}");
+    }
     true
 }
 
 /// Process/file name of the application owning `hwnd`, e.g. "chrome.exe".
+#[allow(dead_code)]
 pub fn window_process_name(hwnd: HWND) -> String {
     unsafe {
         if hwnd.0.is_null() {
