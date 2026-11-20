@@ -23,6 +23,7 @@ abrakadabra/out_*.txt
 abrakadabra/_static_check/
 abrakadabra/_old_settings.rs
 abrakadabra/data/check/
+abrakadabra/screen.png
 abrakadabra/data/appdata/
 abrakadabra/data/*.old
 
@@ -65,6 +66,9 @@ abrakadabra/tools/rules_probe2.py
 abrakadabra/tools/rules_probe3.py
 abrakadabra/tools/selection_probe.py
 abrakadabra/tools/settings_probe.py
+abrakadabra/tools/notepad_hook_test.py
+abrakadabra/tools/tray_expand.py
+abrakadabra/tools/tray_font_probe.py
 abrakadabra/tools/autostart_bmclick_probe.py
 abrakadabra/tools/autostart_click_probe.py
 abrakadabra/tools/autostart_toggle_probe.py

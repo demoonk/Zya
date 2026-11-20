@@ -747,7 +747,8 @@ mod tests {
     }
 
     #[test]
-    fn variant_indexes_are_distinct() {        assert_eq!(variant(true, true), 0);
+    fn variant_indexes_are_distinct() {
+        assert_eq!(variant(true, true), 0);
         assert_eq!(variant(false, true), 1);
         assert_eq!(variant(true, false), 2);
         assert_eq!(variant(false, false), 3);
