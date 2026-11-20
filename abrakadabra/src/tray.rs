@@ -10,14 +10,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
-use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleDC, CreateDIBSection, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject,
-    DrawTextW, FillRect, GetDC, GetTextExtentPoint32W, LineTo, MoveToEx, ReleaseDC, SelectObject,
-    SetBkColor, SetBkMode, SetTextColor, BITMAPINFO, BITMAPINFOHEADER, CLIP_DEFAULT_PRECIS,
-    DEFAULT_CHARSET, DEFAULT_QUALITY, DIB_RGB_COLORS, DT_CENTER, DT_SINGLELINE, DT_VCENTER,
-    FF_MODERN, HGDIOBJ, OPAQUE, OUT_DEFAULT_PRECIS, PS_SOLID,
-};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
     NOTIFYICONDATAW,
@@ -47,118 +40,152 @@ const ICON_SIZE: i32 = 32;
 const MASK_BYTES: usize = ICON_SIZE as usize * 4;
 const BITS_BYTES: usize = ICON_SIZE as usize * ICON_SIZE as usize * 4;
 
-fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
-    COLORREF(((b as u32) << 16) | ((g as u32) << 8) | r as u32)
+// Letter geometry. A real font cannot do this: "RU" in Segoe UI Bold is roughly
+// 1.9 times wider than it is tall, so the widest pair that fits a 32 px square is
+// only ~15 px high and reads as a blurry smudge in the tray. The glyphs below are
+// drawn as geometric shapes that fill the icon: 30 px wide, 26 px tall.
+const GLYPH_W: f32 = 14.0;
+const GLYPH_H: f32 = 26.0;
+const GLYPH_GAP: f32 = 2.0;
+const STROKE: f32 = 4.0;
+// Supersampling factor: 4x4 samples per icon pixel give antialiased edges, which
+// are written into the alpha channel.
+const SS: i32 = 4;
+
+#[derive(Clone)]
+enum Shape {
+    Rect(f32, f32, f32, f32),
+    Poly(Vec<[f32; 2]>),
 }
 
-/// Draw a 32x32 transparent icon: layout letters only, no solid background plate.
-/// Dark theme uses white letters; light theme uses black letters. Auto-off gets a
-/// red slash, but the background stays transparent.
-unsafe fn tray_icon_resource(is_ru: bool, auto: bool, dark: bool) -> Vec<u8> {
-    let label = if is_ru { "RU" } else { "EN" };
-
-    let screen_dc = GetDC(None);
-    let mem_dc = CreateCompatibleDC(Some(screen_dc));
-
-    let bmi = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: 40,
-            biWidth: ICON_SIZE,
-            biHeight: -ICON_SIZE,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: 0,
-            biSizeImage: BITS_BYTES as u32,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-
-    let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
-    let Ok(bitmap) = CreateDIBSection(Some(screen_dc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
-    else {
-        ReleaseDC(None, screen_dc);
-        return Vec::new();
-    };
-    if bitmap.0.is_null() || bits.is_null() {
-        ReleaseDC(None, screen_dc);
-        return Vec::new();
-    }
-
-    let _ = SelectObject(mem_dc, HGDIOBJ(bitmap.0));
-
-    // Pick the biggest Segoe UI glyph that still fits the 32x32 icon: the letters
-    // are as wide as the tray icon allows, leaving a one-pixel margin on each side.
-    let text = wide(label);
-    let mut glyph_font = HGDIOBJ(std::ptr::null_mut());
-    for height in (10..=ICON_SIZE).rev() {
-        let candidate = CreateFontW(
-            height,
-            0,
-            0,
-            0,
-            700,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS,
-            CLIP_DEFAULT_PRECIS,
-            DEFAULT_QUALITY,
-            FF_MODERN.0 as u32,
-            PCWSTR(wide("Segoe UI").as_ptr()),
-        );
-        let _ = SelectObject(mem_dc, HGDIOBJ(candidate.0));
-        let mut extent = SIZE { cx: 0, cy: 0 };
-        let _ = GetTextExtentPoint32W(mem_dc, &text[..text.len() - 1], &mut extent);
-        if extent.cx <= ICON_SIZE - 2 && extent.cy <= ICON_SIZE - 2 {
-            glyph_font = HGDIOBJ(candidate.0);
-            break;
+fn inside(shape: &Shape, px: f32, py: f32) -> bool {
+    match shape {
+        Shape::Rect(x0, y0, x1, y1) => px >= *x0 && px < *x1 && py >= *y0 && py < *y1,
+        // Every polygon used below is convex and wound the same way, so the sign
+        // of the cross product against each edge is the whole point-in-polygon test.
+        Shape::Poly(pts) => {
+            let mut positive = false;
+            let mut negative = false;
+            let n = pts.len();
+            for i in 0..n {
+                let [x1, y1] = pts[i];
+                let [x2, y2] = pts[(i + 1) % n];
+                let cross = (x2 - x1) * (py - y1) - (y2 - y1) * (px - x1);
+                if cross > 1e-9 {
+                    positive = true;
+                } else if cross < -1e-9 {
+                    negative = true;
+                }
+                if positive && negative {
+                    return false;
+                }
+            }
+            true
         }
-        let _ = DeleteObject(HGDIOBJ(candidate.0));
     }
-    if glyph_font.0.is_null() {
-        ReleaseDC(None, screen_dc);
-        return Vec::new();
-    }
-    let _ = SelectObject(mem_dc, glyph_font);
+}
 
-    // The plate is painted white only so that every non-white pixel can be read
-    // back as "glyph or slash" when the mask is built. The final icon has no
-    // background: the mask makes the plate fully transparent.
-    let background = RECT {
-        left: 0,
-        top: 0,
-        right: ICON_SIZE,
-        bottom: ICON_SIZE,
+fn letter_shapes(ch: char, ox: f32, oy: f32) -> Vec<Shape> {
+    let (w, h, s) = (GLYPH_W, GLYPH_H, STROKE);
+    match ch {
+        'R' => vec![
+            Shape::Rect(ox, oy, ox + s, oy + h), // stem
+            Shape::Rect(ox, oy, ox + w, oy + s), // top bar
+            Shape::Rect(ox + w - s, oy, ox + w, oy + h / 2.0), // bowl right side
+            Shape::Rect(ox + s, oy + h / 2.0 - s, ox + w, oy + h / 2.0), // bowl bottom
+            // Leg: a band from the bottom of the bowl down to the right corner.
+            Shape::Poly(vec![
+                [ox + s, oy + h / 2.0],
+                [ox + w - s, oy + h / 2.0],
+                [ox + w, oy + h],
+                [ox + w - s, oy + h],
+            ]),
+        ],
+        'U' => vec![
+            Shape::Rect(ox, oy, ox + s, oy + h),
+            Shape::Rect(ox + w - s, oy, ox + w, oy + h),
+            Shape::Rect(ox, oy + h - s, ox + w, oy + h),
+        ],
+        'E' => vec![
+            Shape::Rect(ox, oy, ox + s, oy + h),
+            Shape::Rect(ox, oy, ox + w, oy + s),
+            Shape::Rect(ox, oy + h / 2.0 - s / 2.0, ox + w - 1.0, oy + h / 2.0 + s / 2.0),
+            Shape::Rect(ox, oy + h - s, ox + w, oy + h),
+        ],
+        'N' => vec![
+            Shape::Rect(ox, oy, ox + s, oy + h),
+            Shape::Rect(ox + w - s, oy, ox + w, oy + h),
+            // Diagonal from the top of the left stem to the bottom of the right one.
+            Shape::Poly(vec![
+                [ox, oy],
+                [ox + s + 1.0, oy],
+                [ox + w, oy + h - s - 2.0],
+                [ox + w, oy + h],
+                [ox + w - s - 1.0, oy + h],
+                [ox, oy + s + 2.0],
+            ]),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+/// Per-pixel coverage (0..=255) of the letters and of the optional auto-off slash.
+fn glyph_coverages(label: &str, auto: bool) -> (Vec<u8>, Vec<u8>) {
+    let total = 2.0 * GLYPH_W + GLYPH_GAP;
+    let x0 = (ICON_SIZE as f32 - total) / 2.0;
+    let y0 = (ICON_SIZE as f32 - GLYPH_H) / 2.0;
+
+    let mut letters = Vec::new();
+    for (i, ch) in label.chars().enumerate() {
+        letters.extend(letter_shapes(ch, x0 + i as f32 * (GLYPH_W + GLYPH_GAP), y0));
+    }
+    let slash: Vec<Shape> = if auto {
+        Vec::new()
+    } else {
+        vec![Shape::Poly(vec![
+            [2.0, 30.0],
+            [5.6, 30.0],
+            [30.0, 5.6],
+            [30.0, 2.0],
+        ])]
     };
-    let _ = FillRect(mem_dc, &background, CreateSolidBrush(rgb(255, 255, 255)));
-    let _ = SetBkColor(mem_dc, rgb(255, 255, 255));
-    let _ = SetTextColor(mem_dc, rgb(0, 0, 0));
-    let _ = SetBkMode(mem_dc, OPAQUE);
 
-    let mut rect = RECT {
-        left: 0,
-        top: 0,
-        right: ICON_SIZE,
-        bottom: ICON_SIZE,
-    };
-    let mut glyphs = text.clone();
-    DrawTextW(
-        mem_dc,
-        glyphs.as_mut_slice(),
-        &mut rect,
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-    );
-
-    if !auto {
-        let pen = CreatePen(PS_SOLID, 3, rgb(220, 0, 0));
-        let _ = SelectObject(mem_dc, HGDIOBJ(pen.0));
-        let _ = MoveToEx(mem_dc, 5, 27, None);
-        let _ = LineTo(mem_dc, 27, 5);
+    let count = (ICON_SIZE * ICON_SIZE) as usize;
+    let mut glyph = vec![0u8; count];
+    let mut slash_cov = vec![0u8; count];
+    for y in 0..ICON_SIZE {
+        for x in 0..ICON_SIZE {
+            let mut hits_glyph = 0;
+            let mut hits_slash = 0;
+            for sy in 0..SS {
+                for sx in 0..SS {
+                    let px = x as f32 + (sx as f32 + 0.5) / SS as f32;
+                    let py = y as f32 + (sy as f32 + 0.5) / SS as f32;
+                    if letters.iter().any(|s| inside(s, px, py)) {
+                        hits_glyph += 1;
+                    }
+                    if slash.iter().any(|s| inside(s, px, py)) {
+                        hits_slash += 1;
+                    }
+                }
+            }
+            let index = (y as usize) * ICON_SIZE as usize + x as usize;
+            glyph[index] = ((hits_glyph * 255) / (SS * SS)) as u8;
+            slash_cov[index] = ((hits_slash * 255) / (SS * SS)) as u8;
+        }
     }
+    (glyph, slash_cov)
+}
 
-    let pixels = bits as *const u32;
+/// Build a 32x32 transparent icon: layout letters only, no solid background plate.
+/// Dark theme uses white letters, light theme black. Auto-off adds a red slash.
+/// Edges are antialiased through the alpha channel.
+fn tray_icon_resource(is_ru: bool, auto: bool, dark: bool) -> Vec<u8> {
+    let label = if is_ru { "RU" } else { "EN" };
+    let (glyph, slash) = glyph_coverages(label, auto);
+
+    let (ir, ig, ib) = if dark { (255u8, 255u8, 255u8) } else { (0u8, 0u8, 0u8) };
+
     let mut data = Vec::new();
     data.extend(&40u32.to_le_bytes());
     data.extend(&(ICON_SIZE as u32).to_le_bytes());
@@ -174,40 +201,30 @@ unsafe fn tray_icon_resource(is_ru: bool, auto: bool, dark: bool) -> Vec<u8> {
     data.resize(40 + BITS_BYTES + MASK_BYTES, 0);
 
     for y in 0..ICON_SIZE {
+        // The icon bitmap is stored bottom-up, the coverage grid top-down.
         let bottom_row = (ICON_SIZE - 1 - y) as usize;
         for x in 0..ICON_SIZE {
-            let px = unsafe { *pixels.add((y * ICON_SIZE + x) as usize) };
-            let r = ((px >> 16) & 0xff) as u8;
-            let g = ((px >> 8) & 0xff) as u8;
-            let b = (px & 0xff) as u8;
-
-            // Anything that is not white-ish belongs to the glyph or slash.
-            let opaque = !(r >= 220 && g >= 220 && b >= 220);
-            if !opaque {
+            let index = (y as usize) * ICON_SIZE as usize + x as usize;
+            let (r, g, b, a) = if slash[index] > glyph[index] {
+                (220, 0, 0, slash[index])
+            } else {
+                (ir, ig, ib, glyph[index])
+            };
+            if a == 0 {
                 continue;
             }
 
-            let (cr, cg, cb) = if r > 150 && g < 90 && b < 90 {
-                // red slash
-                (220, 0, 0)
-            } else if dark {
-                (255, 255, 255)
-            } else {
-                (0, 0, 0)
-            };
-
             let off = 40 + bottom_row * (ICON_SIZE as usize * 4) + x as usize * 4;
-            data[off] = cb;
-            data[off + 1] = cg;
-            data[off + 2] = cr;
-            data[off + 3] = 255;
+            data[off] = b;
+            data[off + 1] = g;
+            data[off + 2] = r;
+            data[off + 3] = a;
 
             let mask_byte = 40 + BITS_BYTES + bottom_row * 4 + (x as usize / 8);
             data[mask_byte] |= 1 << (7 - (x as usize % 8));
         }
     }
 
-    ReleaseDC(None, screen_dc);
     data
 }
 
@@ -591,7 +608,7 @@ mod tests {
     #[test]
     fn tray_icons_are_transparent_and_use_theme_text_color() {
         for dark in [true, false] {
-            let data = unsafe { tray_icon_resource(true, true, dark) };
+            let data = tray_icon_resource(true, true, dark);
             assert_eq!(data.len(), 40 + BITS_BYTES + MASK_BYTES);
 
             let xor = &data[40..40 + BITS_BYTES];
@@ -630,10 +647,10 @@ mod tests {
             ("tray_ru_on_light", true, true, false),
             ("tray_en_on_dark", false, true, true),
             ("tray_en_on_light", false, true, false),
+            ("tray_ru_off_dark", true, false, true),
         ] {
-            let data = unsafe { tray_icon_resource(ru, auto, dark) };
+            let data = tray_icon_resource(ru, auto, dark);
             let xor = &data[40..40 + BITS_BYTES];
-            let mask = &data[40 + BITS_BYTES..];
             let mut bmp = Vec::new();
             bmp.extend(&40u32.to_le_bytes());
             bmp.extend(&(ICON_SIZE as u32).to_le_bytes());
@@ -646,46 +663,86 @@ mod tests {
             bmp.extend(&0i32.to_le_bytes());
             bmp.extend(&0u32.to_le_bytes());
             bmp.extend(&0u32.to_le_bytes());
-            // Both the icon bits and the BMP rows are stored bottom-up.
+            // The icon bitmap rows are stored bottom-up, the BMP rows too.
             for row in 0..ICON_SIZE {
                 for col in 0..ICON_SIZE {
                     let index = (row as usize) * ICON_SIZE as usize + col as usize;
-                    let opaque = mask[row as usize * 4 + col as usize / 8] & (1 << (7 - col as usize % 8)) != 0;
-                    if opaque {
-                        bmp.extend(&[xor[index * 4 + 2], xor[index * 4 + 1], xor[index * 4]]);
-                    } else if dark {
-                        bmp.extend(&[0x19, 0x15, 0x12]);
-                    } else {
-                        bmp.extend(&[0xF7, 0xF5, 0xF3]);
-                    }
+                    let a = xor[index * 4 + 3] as f32 / 255.0;
+                    let r = xor[index * 4 + 2] as f32;
+                    let g = xor[index * 4 + 1] as f32;
+                    let b = xor[index * 4] as f32;
+                    let (br, bg, bb) = if dark { (25.0, 21.0, 18.0) } else { (247.0, 245.0, 243.0) };
+                    bmp.extend(&[
+                        (b * a + bb * (1.0 - a)) as u8,
+                        (g * a + bg * (1.0 - a)) as u8,
+                        (r * a + br * (1.0 - a)) as u8,
+                    ]);
                 }
             }
             std::fs::write(format!("data/check/{name}.bmp"), bmp)
                 .expect("preview written");
+            std::fs::write(format!("data/check/{name}.icon"), &data)
+                .expect("icon dump written");
         }
     }
 
     #[test]
-    fn tray_glyph_spans_the_icon_width() {
-        for label_ru in [true, false] {
-            let data = unsafe { tray_icon_resource(label_ru, true, true) };
-            let mask = &data[40 + BITS_BYTES..];
-            let mut min_col = ICON_SIZE;
-            let mut max_col = -1;
-            for row in 0..ICON_SIZE {
-                for col in 0..ICON_SIZE {
-                    if mask[row as usize * 4 + (col as usize / 8)] & (1 << (7 - col as usize % 8)) != 0 {
-                        if col < min_col {
-                            min_col = col;
-                        }
-                        if col > max_col {
-                            max_col = col;
+    fn tray_glyph_fills_the_icon() {
+        for is_ru in [true, false] {
+            for auto in [true, false] {
+                let data = tray_icon_resource(is_ru, auto, true);
+                let xor = &data[40..40 + BITS_BYTES];
+                let mut min_col = ICON_SIZE;
+                let mut max_col = -1;
+                let mut min_row = ICON_SIZE;
+                let mut max_row = -1;
+                let mut ink = 0;
+                for row in 0..ICON_SIZE {
+                    for col in 0..ICON_SIZE {
+                        let alpha = xor[(row as usize * ICON_SIZE as usize + col as usize) * 4 + 3];
+                        if alpha > 0 {
+                            ink += 1;
+                            if col < min_col {
+                                min_col = col;
+                            }
+                            if col > max_col {
+                                max_col = col;
+                            }
+                            if row < min_row {
+                                min_row = row;
+                            }
+                            if row > max_row {
+                                max_row = row;
+                            }
                         }
                     }
                 }
+                let width = max_col - min_col + 1;
+                let height = max_row - min_row + 1;
+                assert!(width >= 26, "glyph only {width} px wide in a 32 px icon");
+                assert!(height >= 22, "glyph only {height} px tall in a 32 px icon");
+                assert!(ink >= 400, "glyph covers only {ink} px of the icon");
             }
-            let width = max_col - min_col + 1;
-            assert!(width >= 22, "glyph only {width} px wide in a 32 px icon");
+        }
+    }
+
+    #[test]
+    fn tray_glyph_is_symmetric_about_the_icon_centre() {
+        for is_ru in [true, false] {
+            let data = tray_icon_resource(is_ru, true, true);
+            let xor = &data[40..40 + BITS_BYTES];
+            let left = (0..ICON_SIZE).filter(|&col| {
+                (0..ICON_SIZE).any(|row| xor[(row as usize * 32 + col as usize) * 4 + 3] > 0)
+            }).next();
+            let right = (0..ICON_SIZE).rev().filter(|&col| {
+                (0..ICON_SIZE).any(|row| xor[(row as usize * 32 + col as usize) * 4 + 3] > 0)
+            }).next();
+            // The ink should be centred: the margins on both sides match.
+            assert_eq!(
+                left.unwrap(),
+                31 - right.unwrap(),
+                "glyph is off centre"
+            );
         }
     }
 
