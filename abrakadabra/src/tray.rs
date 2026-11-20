@@ -3,14 +3,21 @@
 //! The icon changes with the state: the code shows the layout the hook is
 //! currently tracking (`RU` = Russian, `EN` = English). Automatic switching is
 //! on when the layout code is clean, off when a red slash crosses it.
-//! The letters are drawn directly into a transparent icon resource:
+//! The letters are the real Segoe UI Bold drawn by GDI, stretched to the widest
+//! size that still fits the icon, straight into a transparent icon resource:
 //! white text in dark theme, black text in light theme, without a colored plate.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, SIZE, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    ANTIALIASED_QUALITY, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleBitmap, CreateCompatibleDC,
+    CreateFontW, DeleteDC, DeleteObject, DIB_RGB_COLORS, FONT_CHARSET, FONT_CLIP_PRECISION,
+    FONT_OUTPUT_PRECISION, FW_BOLD, GetDIBits, GetTextExtentPoint32W, HDC, HFONT, OPAQUE,
+    SelectObject, SetBkColor, SetBkMode, SetTextColor, TextOutW,
+};
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
     NOTIFYICONDATAW,
@@ -40,138 +47,262 @@ const ICON_SIZE: i32 = 32;
 const MASK_BYTES: usize = ICON_SIZE as usize * 4;
 const BITS_BYTES: usize = ICON_SIZE as usize * ICON_SIZE as usize * 4;
 
-// Letter geometry. A real font cannot do this: "RU" in Segoe UI Bold is roughly
-// 1.9 times wider than it is tall, so the widest pair that fits a 32 px square is
-// only ~15 px high and reads as a blurry smudge in the tray. The glyphs below are
-// drawn as geometric shapes that fill the icon: 30 px wide, 26 px tall.
-const GLYPH_W: f32 = 14.0;
-const GLYPH_H: f32 = 26.0;
-const GLYPH_GAP: f32 = 2.0;
-const STROKE: f32 = 4.0;
-// Supersampling factor: 4x4 samples per icon pixel give antialiased edges, which
-// are written into the alpha channel.
+// The letters are the real Segoe UI Bold rendered by GDI, not hand-drawn shapes.
+// Supersampling factor: SS x SS device pixels per icon pixel, so the font's own
+// antialiasing is averaged into the alpha channel instead of being thrown away.
 const SS: i32 = 4;
+const SS_SIZE: i32 = ICON_SIZE * SS;
+// Widest the letters may get: one icon pixel of clearance on each side.
+const MAX_INK: i32 = (ICON_SIZE - 2) * SS;
+// Thickness of the auto-off slash, in icon pixels.
+const SLASH_W: f32 = 4.0;
+
+unsafe fn segoe_ui_bold(em: i32) -> HFONT {
+    static FACE: OnceLock<Vec<u16>> = OnceLock::new();
+    let face = FACE.get_or_init(|| "Segoe UI".encode_utf16().chain(std::iter::once(0)).collect());
+    // A negative height means "em height in device pixels", i.e. the size the
+    // font is really drawn at.
+    CreateFontW(
+        -em,
+        0,
+        0,
+        0,
+        FW_BOLD.0 as i32,
+        0,
+        0,
+        0,
+        FONT_CHARSET(0),
+        FONT_OUTPUT_PRECISION(0),
+        FONT_CLIP_PRECISION(0),
+        ANTIALIASED_QUALITY,
+        0,
+        PCWSTR(face.as_ptr()),
+    )
+}
+
+/// Draw `text` into a fresh black SS_SIZE x SS_SIZE bitmap and return one
+/// coverage byte per supersample. Ink is white on black, so the brightness of a
+/// pixel is exactly its coverage.
+unsafe fn ink_samples(hdc: HDC, font: HFONT, text: &[u16], x: i32, y: i32) -> Vec<u8> {
+    let bitmap = CreateCompatibleBitmap(hdc, SS_SIZE, SS_SIZE);
+    if bitmap.0.is_null() {
+        return Vec::new();
+    }
+    // Draw into a bitmap, not into the DC's own 1x1 placeholder.
+    SelectObject(hdc, bitmap.into());
+    SelectObject(hdc, font.into());
+    SetTextColor(hdc, COLORREF(0x00FF_FFFF));
+    SetBkColor(hdc, COLORREF(0));
+    SetBkMode(hdc, OPAQUE);
+    let drawn = TextOutW(hdc, x, y, text).as_bool();
+
+    let mut bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: SS_SIZE,
+            biHeight: -SS_SIZE, // negative: rows come back top-down
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: 0,
+            biSizeImage: (SS_SIZE * SS_SIZE * 4) as u32,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut bits = vec![0u8; (SS_SIZE * SS_SIZE * 4) as usize];
+    let rows = GetDIBits(
+        hdc,
+        bitmap,
+        0,
+        SS_SIZE as u32,
+        Some(bits.as_mut_ptr() as *mut core::ffi::c_void),
+        &mut bmi,
+        DIB_RGB_COLORS,
+    );
+    let _ = DeleteObject(bitmap.into());
+
+    if !drawn || rows <= 0 {
+        return Vec::new();
+    }
+    bits.chunks(4).map(|px| px[0].max(px[1]).max(px[2])).collect()
+}
+
+/// Bounding box (x0, y0, x1, y1) of the ink in supersample units.
+fn ink_bbox(samples: &[u8]) -> (i32, i32, i32, i32) {
+    let (mut x0, mut y0) = (SS_SIZE, SS_SIZE);
+    let (mut x1, mut y1) = (-1, -1);
+    for (i, &c) in samples.iter().enumerate() {
+        if c == 0 {
+            continue;
+        }
+        let x = (i % SS_SIZE as usize) as i32;
+        let y = (i / SS_SIZE as usize) as i32;
+        if x < x0 {
+            x0 = x;
+        }
+        if x > x1 {
+            x1 = x;
+        }
+        if y < y0 {
+            y0 = y;
+        }
+        if y > y1 {
+            y1 = y;
+        }
+    }
+    (x0, y0, x1, y1)
+}
+
+/// Render the layout letters with Segoe UI Bold at the largest size that still
+/// fits the icon, centred, and average the supersamples down to one coverage
+/// byte per icon pixel. Also returns the ink box in icon pixels.
+unsafe fn letter_coverages(label: &str) -> (Vec<u8>, (i32, i32, i32, i32)) {
+    let text: Vec<u16> = label.encode_utf16().collect();
+    let hdc = CreateCompatibleDC(None);
+
+    // First pass: the advance width reported by GDI bounds the font size. It
+    // includes the side bearings, so the ink itself can still afford a couple of
+    // points more - the second pass walks up from there and stops when the ink
+    // would touch the icon edge.
+    let mut extent = SIZE { cx: 0, cy: 0 };
+    let mut advance_em = 1;
+    for em in 1..=MAX_INK {
+        let font = segoe_ui_bold(em);
+        SelectObject(hdc, font.into());
+        if GetTextExtentPoint32W(hdc, &text, &mut extent).as_bool()
+            && extent.cx <= MAX_INK
+            && extent.cy <= MAX_INK
+        {
+            advance_em = em;
+        }
+        let _ = DeleteObject(font.into());
+    }
+
+    let (mut em_used, mut samples) = (0, Vec::new());
+    for em in advance_em..=advance_em + 8 {
+        let font = segoe_ui_bold(em);
+        let probe = ink_samples(hdc, font, &text, 0, 0);
+        let _ = DeleteObject(font.into());
+        if probe.is_empty() {
+            break;
+        }
+        let (x0, y0, x1, y1) = ink_bbox(&probe);
+        if x1 - x0 + 1 <= MAX_INK && y1 - y0 + 1 <= MAX_INK {
+            em_used = em;
+            samples = probe;
+        } else {
+            break;
+        }
+    }
+    if samples.is_empty() {
+        let font = segoe_ui_bold(advance_em);
+        samples = ink_samples(hdc, font, &text, 0, 0);
+        let _ = DeleteObject(font.into());
+        em_used = advance_em;
+    }
+
+    // Slide the ink so it sits dead-centre in the icon, then render it again in
+    // place; the bbox of a shifted glyph is just the old bbox plus the shift.
+    let (x0, y0, x1, y1) = ink_bbox(&samples);
+    let dx = (SS_SIZE - (x1 - x0 + 1)) / 2 - x0;
+    let dy = (SS_SIZE - (y1 - y0 + 1)) / 2 - y0;
+    let font = segoe_ui_bold(em_used);
+    let centred = ink_samples(hdc, font, &text, dx, dy);
+    let _ = DeleteObject(font.into());
+    let _ = DeleteDC(hdc);
+    let centred = if centred.is_empty() { samples } else { centred };
+    let (x0, y0, x1, y1) = ink_bbox(&centred);
+
+    let mut grid = vec![0u8; (ICON_SIZE * ICON_SIZE) as usize];
+    for y in 0..ICON_SIZE {
+        for x in 0..ICON_SIZE {
+            let mut sum = 0u32;
+            for sy in 0..SS {
+                for sx in 0..SS {
+                    let sx = (x * SS + sx) as usize;
+                    let sy = (y * SS + sy) as usize;
+                    sum += centred[sy * SS_SIZE as usize + sx] as u32;
+                }
+            }
+            grid[(y as usize) * ICON_SIZE as usize + x as usize] =
+                ((sum + (SS * SS) as u32 / 2) / SS as u32 / SS as u32) as u8;
+        }
+    }
+    (grid, (x0 / SS, y0 / SS, x1 / SS, y1 / SS))
+}
 
 #[derive(Clone)]
 enum Shape {
-    Rect(f32, f32, f32, f32),
     Poly(Vec<[f32; 2]>),
 }
 
 fn inside(shape: &Shape, px: f32, py: f32) -> bool {
-    match shape {
-        Shape::Rect(x0, y0, x1, y1) => px >= *x0 && px < *x1 && py >= *y0 && py < *y1,
-        // Every polygon used below is convex and wound the same way, so the sign
-        // of the cross product against each edge is the whole point-in-polygon test.
-        Shape::Poly(pts) => {
-            let mut positive = false;
-            let mut negative = false;
-            let n = pts.len();
-            for i in 0..n {
-                let [x1, y1] = pts[i];
-                let [x2, y2] = pts[(i + 1) % n];
-                let cross = (x2 - x1) * (py - y1) - (y2 - y1) * (px - x1);
-                if cross > 1e-9 {
-                    positive = true;
-                } else if cross < -1e-9 {
-                    negative = true;
-                }
-                if positive && negative {
-                    return false;
-                }
-            }
-            true
+    // The only polygon here is the slash, which is convex and wound the same
+    // way, so the sign of the cross product against each edge is the whole
+    // point-in-polygon test.
+    let Shape::Poly(pts) = shape;
+    let mut positive = false;
+    let mut negative = false;
+    let n = pts.len();
+    for i in 0..n {
+        let [x1, y1] = pts[i];
+        let [x2, y2] = pts[(i + 1) % n];
+        let cross = (x2 - x1) * (py - y1) - (y2 - y1) * (px - x1);
+        if cross > 1e-9 {
+            positive = true;
+        } else if cross < -1e-9 {
+            negative = true;
+        }
+        if positive && negative {
+            return false;
         }
     }
+    true
 }
 
-fn letter_shapes(ch: char, ox: f32, oy: f32) -> Vec<Shape> {
-    let (w, h, s) = (GLYPH_W, GLYPH_H, STROKE);
-    match ch {
-        'R' => vec![
-            Shape::Rect(ox, oy, ox + s, oy + h), // stem
-            Shape::Rect(ox, oy, ox + w, oy + s), // top bar
-            Shape::Rect(ox + w - s, oy, ox + w, oy + h / 2.0), // bowl right side
-            Shape::Rect(ox + s, oy + h / 2.0 - s, ox + w, oy + h / 2.0), // bowl bottom
-            // Leg: a band from the bottom of the bowl down to the right corner.
-            Shape::Poly(vec![
-                [ox + s, oy + h / 2.0],
-                [ox + w - s, oy + h / 2.0],
-                [ox + w, oy + h],
-                [ox + w - s, oy + h],
-            ]),
-        ],
-        'U' => vec![
-            Shape::Rect(ox, oy, ox + s, oy + h),
-            Shape::Rect(ox + w - s, oy, ox + w, oy + h),
-            Shape::Rect(ox, oy + h - s, ox + w, oy + h),
-        ],
-        'E' => vec![
-            Shape::Rect(ox, oy, ox + s, oy + h),
-            Shape::Rect(ox, oy, ox + w, oy + s),
-            Shape::Rect(ox, oy + h / 2.0 - s / 2.0, ox + w - 1.0, oy + h / 2.0 + s / 2.0),
-            Shape::Rect(ox, oy + h - s, ox + w, oy + h),
-        ],
-        'N' => vec![
-            Shape::Rect(ox, oy, ox + s, oy + h),
-            Shape::Rect(ox + w - s, oy, ox + w, oy + h),
-            // Diagonal from the top of the left stem to the bottom of the right one.
-            Shape::Poly(vec![
-                [ox, oy],
-                [ox + s + 1.0, oy],
-                [ox + w, oy + h - s - 2.0],
-                [ox + w, oy + h],
-                [ox + w - s - 1.0, oy + h],
-                [ox, oy + s + 2.0],
-            ]),
-        ],
-        _ => Vec::new(),
-    }
+/// A slash that crosses the letters: the band runs from just below the left edge
+/// of the ink box to just above its right edge.
+fn slash_shape(ink: (i32, i32, i32, i32)) -> Shape {
+    let (x0, y0, x1, y1) = (ink.0 as f32, ink.1 as f32, ink.2 as f32, ink.3 as f32);
+    let (ax, ay) = (x0 - 2.0, y1 + 2.0); // lower left, outside the letters
+    let (bx, by) = (x1 + 2.0, y0 - 2.0); // upper right
+    let (dx, dy) = (bx - ax, by - ay);
+    let len = (dx * dx + dy * dy).sqrt().max(1.0);
+    let (nx, ny) = (-dy / len, dx / len);
+    let h = SLASH_W / 2.0;
+    Shape::Poly(vec![
+        [ax - nx * h, ay - ny * h],
+        [bx - nx * h, by - ny * h],
+        [bx + nx * h, by + ny * h],
+        [ax + nx * h, ay + ny * h],
+    ])
 }
 
 /// Per-pixel coverage (0..=255) of the letters and of the optional auto-off slash.
 fn glyph_coverages(label: &str, auto: bool) -> (Vec<u8>, Vec<u8>) {
-    let total = 2.0 * GLYPH_W + GLYPH_GAP;
-    let x0 = (ICON_SIZE as f32 - total) / 2.0;
-    let y0 = (ICON_SIZE as f32 - GLYPH_H) / 2.0;
-
-    let mut letters = Vec::new();
-    for (i, ch) in label.chars().enumerate() {
-        letters.extend(letter_shapes(ch, x0 + i as f32 * (GLYPH_W + GLYPH_GAP), y0));
-    }
+    let (glyph, ink) = unsafe { letter_coverages(label) };
     let slash: Vec<Shape> = if auto {
         Vec::new()
     } else {
-        vec![Shape::Poly(vec![
-            [2.0, 30.0],
-            [5.6, 30.0],
-            [30.0, 5.6],
-            [30.0, 2.0],
-        ])]
+        vec![slash_shape(ink)]
     };
 
     let count = (ICON_SIZE * ICON_SIZE) as usize;
-    let mut glyph = vec![0u8; count];
     let mut slash_cov = vec![0u8; count];
     for y in 0..ICON_SIZE {
         for x in 0..ICON_SIZE {
-            let mut hits_glyph = 0;
             let mut hits_slash = 0;
             for sy in 0..SS {
                 for sx in 0..SS {
                     let px = x as f32 + (sx as f32 + 0.5) / SS as f32;
                     let py = y as f32 + (sy as f32 + 0.5) / SS as f32;
-                    if letters.iter().any(|s| inside(s, px, py)) {
-                        hits_glyph += 1;
-                    }
                     if slash.iter().any(|s| inside(s, px, py)) {
                         hits_slash += 1;
                     }
                 }
             }
-            let index = (y as usize) * ICON_SIZE as usize + x as usize;
-            glyph[index] = ((hits_glyph * 255) / (SS * SS)) as u8;
-            slash_cov[index] = ((hits_slash * 255) / (SS * SS)) as u8;
+            slash_cov[(y as usize) * ICON_SIZE as usize + x as usize] =
+                ((hits_slash * 255) / (SS * SS)) as u8;
         }
     }
     (glyph, slash_cov)
@@ -648,6 +779,8 @@ mod tests {
             ("tray_en_on_dark", false, true, true),
             ("tray_en_on_light", false, true, false),
             ("tray_ru_off_dark", true, false, true),
+            ("tray_ru_off_light", true, false, false),
+            ("tray_en_off_dark", false, false, true),
         ] {
             let data = tray_icon_resource(ru, auto, dark);
             let xor = &data[40..40 + BITS_BYTES];
@@ -719,9 +852,12 @@ mod tests {
                 }
                 let width = max_col - min_col + 1;
                 let height = max_row - min_row + 1;
-                assert!(width >= 26, "glyph only {width} px wide in a 32 px icon");
-                assert!(height >= 22, "glyph only {height} px tall in a 32 px icon");
-                assert!(ink >= 400, "glyph covers only {ink} px of the icon");
+                // Measured with the real Segoe UI Bold: the widest pair that
+                // fits is 30 px wide (1 px of clearance on each side) and about
+                // 18 px tall from the top of the capitals to their baseline.
+                assert!(width >= 28, "glyph only {width} px wide in a 32 px icon");
+                assert!(height >= 16, "glyph only {height} px tall in a 32 px icon");
+                assert!(ink >= 300, "glyph covers only {ink} px of the icon");
             }
         }
     }
@@ -745,7 +881,6 @@ mod tests {
             );
         }
     }
-
     #[test]
     fn variant_indexes_are_distinct() {
         assert_eq!(variant(true, true), 0);

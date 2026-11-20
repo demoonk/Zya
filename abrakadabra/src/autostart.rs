@@ -203,7 +203,7 @@ mod tests {
         assert!(key.is_some(), "HKCU\\...\\Run должна читаться");
         if let Some(key) = key {
             unsafe {
-                windows::Win32::System::Registry::RegCloseKey(key).ok();
+                let _ = windows::Win32::System::Registry::RegCloseKey(key);
             }
         }
     }

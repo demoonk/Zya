@@ -43,7 +43,8 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CallNextHookEx, CallWindowProcW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW,
     DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, GetClientRect, GetCursorPos,
-    GetWindowLongPtrW, GetMessageW, GetWindowTextW, GWL_ID, GWL_WNDPROC, HHOOK,
+    GetWindowLongPtrW, GetMessageW, GetWindowTextW, GetWindowRect, GWL_ID, GWL_WNDPROC, HHOOK,
+    CreateIconFromResourceEx, HICON, IMAGE_FLAGS,
     HMENU, IDC_ARROW, HWND_TOP,
     KBDLLHOOKSTRUCT, LLKHF_UP, MF_ENABLED, MSG, PostMessageW, RegisterClassExW, SendMessageW,
     SetWindowLongPtrW, SetWindowLongW, SetWindowPos, SetWindowsHookExW, SetWindowTextW, ShowWindow,
@@ -103,7 +104,6 @@ const TAB_IGNORE: usize = 101;
 const TAB_LOG: usize = 102;
 
 const BTN_CONFIG: usize = 110;
-const BTN_CLOSE: usize = 111;
 const BTN_UPDATE: usize = 112;
 
 const CB_AUTOSTART: usize = 120;
@@ -133,7 +133,9 @@ const WS_TABSTOP_STYLE: WINDOW_STYLE = WINDOW_STYLE(0x00000010);
 const WS_BORDER_STYLE: WINDOW_STYLE = WINDOW_STYLE(0x00000080);
 const BS_OWNERDRAW_STYLE: WINDOW_STYLE = WINDOW_STYLE(0x0000000B);
 const OWNERDRAW_LIST_STYLE: WINDOW_STYLE = WINDOW_STYLE(LVS_REPORT | 0x00000400);
-const SETTINGS_WINDOW_STYLE: WINDOW_STYLE = WINDOW_STYLE(0x0000002B);
+// WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX. A normal Windows window: real caption
+// with the system close and minimise buttons, no resize frame (the layout is fixed).
+const SETTINGS_WINDOW_STYLE: WINDOW_STYLE = WINDOW_STYLE(12582912 + 524288 + 131072);
 
 // Notification codes that the owner-draw list views send to their parent.
 const NM_CLICK: u32 = 0x1111;
@@ -1085,8 +1087,7 @@ unsafe fn create_controls(parent: HWND, dpi: u32) {
     }
 
     let right = CONTENT_X + CONTENT_WIDTH;
-    make_button(parent, dpi, "Открыть файл конфигурации", right - 242, HEADER_TOP, 190, 34, BTN_CONFIG);
-    make_button(parent, dpi, "✕", right - 34, HEADER_TOP, 34, 34, BTN_CLOSE);
+    make_button(parent, dpi, "Открыть файл конфигурации", right - 190, HEADER_TOP, 190, 34, BTN_CONFIG);
 
     // 1. Settings
     make_button(parent, dpi, "Проверить обновления", right - 190, 112, 190, 40, BTN_UPDATE);
@@ -1318,9 +1319,6 @@ unsafe extern "system" fn settings_proc(
                     repaint(hwnd);
                 }
                 BTN_CONFIG => open_config_file(),
-                BTN_CLOSE => {
-                    DestroyWindow(hwnd).ok();
-                }
                 BTN_UPDATE => run_update(),
                 CB_AUTOSTART => toggle_autostart(),
                 CB_ADMIN => toggle_admin_autostart(),
@@ -1573,24 +1571,6 @@ unsafe fn draw_button(info: &DRAWITEMSTRUCT, hwnd: HWND) {
                     | windows::Win32::Graphics::Gdi::DT_SINGLELINE,
             );
         }
-        BTN_CLOSE => {
-            rounded(info.hDC, rect.left, rect.top, width, height, s(6, dpi), card_color(), card_border());
-            draw_text(
-                info.hDC,
-                "✕",
-                &RECT {
-                    left: rect.left,
-                    top: rect.top,
-                    right: rect.right,
-                    bottom: rect.bottom,
-                },
-                fonts(dpi).body,
-                dim_color(),
-                windows::Win32::Graphics::Gdi::DT_CENTER
-                    | windows::Win32::Graphics::Gdi::DT_VCENTER
-                    | windows::Win32::Graphics::Gdi::DT_SINGLELINE,
-            );
-        }
         _ => {
             rounded(info.hDC, rect.left, rect.top, width, height, s(8, dpi), button_color(), card_border());
             draw_text(
@@ -1809,7 +1789,6 @@ fn label_of(role: usize) -> String {
         TAB_IGNORE => "Игнорировать".into(),
         TAB_LOG => "Лог".into(),
         BTN_CONFIG => "Открыть файл конфигурации".into(),
-        BTN_CLOSE => "✕".into(),
         BTN_UPDATE => "Проверить обновления".into(),
         CB_AUTOSTART => "Автозапуск при входе".into(),
         CB_ADMIN => "Запускать как администратор".into(),
@@ -2819,12 +2798,30 @@ unsafe fn update_status(text: &str) {
     }
 }
 
-unsafe fn set_window_icon(hwnd: HWND) {
+// The key-cap icon is baked into data/app.ico; take its 32x32 BMP frame
+// (40-byte header + 32*32*4 pixels + 128-byte AND mask = 4264 bytes) so the
+// caption shows the same icon as the executable, whatever the working
+// directory happens to be.
+unsafe fn window_icon() -> Option<HICON> {
+    static ICON: &[u8] = include_bytes!("../data/app.ico");
+    const HEADER: [u8; 16] = [0x28, 0, 0, 0, 0x20, 0, 0, 0, 0x40, 0, 0, 0, 0x01, 0, 0x20, 0];
+    let built = ICON
+        .windows(HEADER.len())
+        .position(|window| window == HEADER)
+        .and_then(|start| ICON.get(start..start + 4264))
+        .and_then(|data| CreateIconFromResourceEx(data, true, 0x0003_0000, 32, 32, IMAGE_FLAGS(0)).ok());
+    if built.is_some() {
+        return built;
+    }
     let name = wide("app.ico");
-    let icon = LoadImageW(name.as_ptr(), name.as_ptr(), 0x00000010, 32, 32, 3);
-    if !icon.is_null() {
-        send(hwnd, WM_SETICON, 0, icon as isize);
-        send(hwnd, WM_SETICON, 1, icon as isize);
+    let fallback = HICON(LoadImageW(name.as_ptr(), name.as_ptr(), 0x00000010, 32, 32, 3));
+    (!fallback.0.is_null()).then_some(fallback)
+}
+
+unsafe fn set_window_icon(hwnd: HWND) {
+    if let Some(icon) = window_icon() {
+        send(hwnd, WM_SETICON, 0, icon.0 as isize);
+        send(hwnd, WM_SETICON, 1, icon.0 as isize);
     }
 }
 
@@ -2938,13 +2935,21 @@ pub fn open_blocking() -> std::io::Result<()> {
             ));
         }
         let dpi = window_dpi(window);
+        // The caption and the frame live outside the client area, so add their
+        // thickness back: the hand-painted layout still gets its 1200x820 canvas.
+        let mut outer = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        let mut inner = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        GetWindowRect(window, &mut outer).ok();
+        GetClientRect(window, &mut inner).ok();
+        let frame_w = (outer.right - outer.left) - (inner.right - inner.left);
+        let frame_h = (outer.bottom - outer.top) - (inner.bottom - inner.top);
         SetWindowPos(
             window,
             None,
             0,
             0,
-            s(WINDOW_WIDTH, dpi),
-            s(WINDOW_HEIGHT, dpi),
+            s(WINDOW_WIDTH, dpi) + frame_w,
+            s(WINDOW_HEIGHT, dpi) + frame_h,
             SWP_NOZORDER,
         )
         .ok();
@@ -2970,7 +2975,11 @@ pub fn self_test() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::Graphics::Gdi::{
+        BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DeleteDC, DIB_RGB_COLORS, GetDIBits,
+    };
     use windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE;
+    use windows::Win32::UI::WindowsAndMessaging::{GetIconInfo, ICONINFO};
 
     #[test]
     fn card_rows_do_not_overlap_the_list() {
@@ -2985,6 +2994,51 @@ mod tests {
         assert!(HOTKEY_CARD_Y + HOTKEY_CARD_H + 40 <= WINDOW_HEIGHT);
         assert!(LOG_CARD_Y + LOG_CARD_H <= STATUS_Y);
         assert!(IGNORE_LIST_CARD_Y + IGNORE_LIST_CARD_H <= STATUS_Y);
+    }
+
+    #[test]
+    fn caption_icon_keeps_the_red_zya() {
+        // The window icon Windows shows in the caption comes from the 32x32 BMP
+        // frame of data/app.ico; guard it against a re-encoded icon losing the red Я.
+        unsafe {
+            let icon = window_icon().expect("key-cap icon should build");
+            let mut info = ICONINFO::default();
+            GetIconInfo(icon, &mut info).unwrap();
+            let dc = CreateCompatibleDC(None);
+            let mut header = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: 32,
+                    biHeight: -32,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut pixels = vec![0u8; 32 * 32 * 4];
+            let rows = GetDIBits(
+                dc,
+                info.hbmColor,
+                0,
+                32,
+                Some(pixels.as_mut_ptr() as *mut c_void),
+                &mut header,
+                DIB_RGB_COLORS,
+            );
+            let _ = DeleteDC(dc);
+            let red = pixels
+                .chunks(4)
+                .filter(|px| px[2] > 120 && px[0] < 60)
+                .count();
+            let blue = pixels
+                .chunks(4)
+                .filter(|px| px[0] > 120 && px[2] < 60)
+                .count();
+            assert_eq!(rows, 32);
+            assert!(red > 40, "the Я of the caption icon must be red");
+            assert_eq!(blue, 0, "the caption icon has no blue pixels");
+        }
     }
 
     #[test]
