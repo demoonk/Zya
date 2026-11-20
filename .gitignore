@@ -99,3 +99,5 @@ release/
 temp_icons/
 *.bak
 *.dib.bak
+abrakadabra/data/tray_*.png
+@AutomationLog.txt
