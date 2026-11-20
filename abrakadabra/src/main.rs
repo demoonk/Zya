@@ -51,6 +51,7 @@ fn usage() {
           z.exe score <текст>     внутренние оценки (ru/en) для каждого токена\n\
           z.exe variants <текст>  варианты прочтения неоднозначных ключей\n\
           z.exe selftest          прогнать встроенные проверочные случаи\n\
+           z.exe updatecheck       сравнить свою версию с последним релизом на GitHub\n\
           z.exe stats             статистику языковой модели\n\
           z.exe probe             раскладки + проверка Alt+Shift на своём окне\n\
           z.exe tgprobe           найти окна Telegram Desktop и снять снимок\n\
@@ -723,6 +724,25 @@ fn main() -> anyhow::Result<()> {
             println!("неоднозначных (зеркало тоже термин): {skipped}");
             for m in misses.iter().take(40) {
                 println!("  MISS {m}");
+            }
+        }
+        "updatecheck" => {
+            let local = update::app_version();
+            match update::check_latest() {
+                Some(release) => {
+                    if update::is_newer(&local, &release.version) {
+                        println!(
+                            "доступно обновление {} (установлено {}): {}",
+                            release.version, local, release.url
+                        );
+                    } else {
+                        println!(
+                            "обновлений нет: установлено {}, последняя на GitHub {}",
+                            local, release.version
+                        );
+                    }
+                }
+                None => println!("не удалось связаться с api.github.com"),
             }
         }
         "selftest" => {

@@ -15,7 +15,7 @@ use windows::core::PCWSTR;
 use windows::Win32::Networking::WinHttp::{
     WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpReadData,
     WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetTimeouts,
-    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_OPEN_REQUEST_FLAGS,
+    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_OPEN_REQUEST_FLAGS,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOW;
@@ -51,16 +51,24 @@ fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().collect()
 }
 
-unsafe fn request(host: &str, path: &str) -> Option<Vec<u8>> {
+unsafe fn request_with_proxy(
+    host: &str,
+    path: &str,
+    proxy: windows::Win32::Networking::WinHttp::WINHTTP_ACCESS_TYPE,
+) -> Option<Vec<u8>> {
+    let debug = std::env::var("ZYA_DEBUG_UPDATE").unwrap_or_default() == "1";
     let agent = wide("ZyaUpdater/1.0");
     let session = WinHttpOpen(
         PCWSTR(agent.as_ptr()),
-        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        proxy,
         PCWSTR::null(),
         PCWSTR::null(),
         0,
     );
     if session.is_null() {
+        if debug {
+            eprintln!("update: WinHttpOpen returned null");
+        }
         return None;
     }
     let _ = WinHttpSetTimeouts(session, 5000, 8000, 8000, 20000);
@@ -68,6 +76,9 @@ unsafe fn request(host: &str, path: &str) -> Option<Vec<u8>> {
     let host_wide = wide(host);
     let connect = WinHttpConnect(session, PCWSTR(host_wide.as_ptr()), 443, 0);
     if connect.is_null() {
+        if debug {
+            eprintln!("update: WinHttpConnect to {host} failed");
+        }
         WinHttpCloseHandle(session).ok();
         return None;
     }
@@ -90,7 +101,11 @@ unsafe fn request(host: &str, path: &str) -> Option<Vec<u8>> {
     }
 
     let sent = WinHttpSendRequest(request, None, None, 0, 0, 0);
-    if sent.is_err() || WinHttpReceiveResponse(request, std::ptr::null_mut()).is_err() {
+    let received = WinHttpReceiveResponse(request, std::ptr::null_mut());
+    if sent.is_err() || received.is_err() {
+        if debug {
+            eprintln!("update: send/receive failed: {:?} / {:?}", sent, received);
+        }
         WinHttpCloseHandle(request).ok();
         WinHttpCloseHandle(connect).ok();
         WinHttpCloseHandle(session).ok();
@@ -119,9 +134,23 @@ unsafe fn request(host: &str, path: &str) -> Option<Vec<u8>> {
     Some(body)
 }
 
+/// Try the system proxy first, then a direct connection: some machines have a
+/// broken proxy entry in the registry and only the direct route works.
+unsafe fn request(host: &str, path: &str) -> Option<Vec<u8>> {
+    match request_with_proxy(host, path, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY) {
+        Some(body) => Some(body),
+        None => request_with_proxy(host, path, WINHTTP_ACCESS_TYPE_NO_PROXY),
+    }
+}
+
 /// The newest release published on GitHub. `None` means "no connection".
 pub fn check_latest() -> Option<Release> {
+    let debug = std::env::var("ZYA_DEBUG_UPDATE").unwrap_or_default() == "1";
     let body = unsafe { request("api.github.com", &format!("/repos/{REPO}/releases/latest")) }?;
+    if debug {
+        let head = String::from_utf8_lossy(&body[..body.len().min(160)]);
+        eprintln!("update: body {} bytes: {head}", body.len());
+    }
     let parsed: ReleaseJson = serde_json::from_slice(&body).ok()?;
     let asset = parsed.assets.iter().find(|a| a.name.eq_ignore_ascii_case("z.exe"))?;
     Some(Release {
@@ -190,5 +219,27 @@ pub fn run_installer(path: &PathBuf) -> bool {
         );
         // ShellExecuteW returns an HINSTANCE; values above 32 mean success.
         (result.0 as isize) > 32
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn version_compare_is_numeric() {
+        assert!(super::is_newer("0.1.1", "0.1.2"));
+        assert!(super::is_newer("0.9.9", "0.10.0"));
+        assert!(!super::is_newer("0.1.2", "0.1.1"));
+        assert!(!super::is_newer("0.1.2", "0.1.2"));
+    }
+
+    #[test]
+    fn latest_release_is_reachable_with_network() {
+        // Guarded so the offline test suite stays green.
+        if std::env::var("ZYA_NETWORK_TEST").unwrap_or_default() != "1" {
+            return;
+        }
+        let release = super::check_latest();
+        println!("latest release: {release:?}");
+        assert!(release.is_some(), "GitHub Releases API должен отвечать");
     }
 }
