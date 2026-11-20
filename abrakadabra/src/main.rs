@@ -1,3 +1,8 @@
+// GUI subsystem: launching zя.exe from Explorer or from the autostart key must
+// not leave a black console window on the screen. Command-line output still
+// works when the program is started from a terminal.
+#![windows_subsystem = "windows"]
+
 mod autostart;
 mod config;
 mod demo;

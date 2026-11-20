@@ -774,13 +774,14 @@ mod tests {
             return;
         }
         for (name, ru, auto, dark) in [
-            ("tray_ru_on_dark", true, true, true),
-            ("tray_ru_on_light", true, true, false),
-            ("tray_en_on_dark", false, true, true),
-            ("tray_en_on_light", false, true, false),
+            ("tray_ru_auto_dark", true, true, true),
+            ("tray_ru_auto_light", true, true, false),
+            ("tray_en_auto_dark", false, true, true),
+            ("tray_en_auto_light", false, true, false),
             ("tray_ru_off_dark", true, false, true),
             ("tray_ru_off_light", true, false, false),
             ("tray_en_off_dark", false, false, true),
+            ("tray_en_off_light", false, false, false),
         ] {
             let data = tray_icon_resource(ru, auto, dark);
             let xor = &data[40..40 + BITS_BYTES];

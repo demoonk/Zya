@@ -9,6 +9,8 @@
 //   - shows a success/error window
 //
 // The GitHub release asset must remain the ASCII file `z.exe`.
+#![windows_subsystem = "windows"]
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
