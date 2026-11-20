@@ -2397,8 +2397,10 @@ unsafe fn open_hotkey_modal(index: usize) {
         PCWSTR(wide("ZyaModalWindow").as_ptr()),
         PCWSTR(wide("").as_ptr()),
         WS_CHILD | WS_VISIBLE,
-        s(360, dpi),
-        s(280, dpi),
+        // Centred over the content column and above the hotkey list, so the
+        // modal never covers the rows it was opened from.
+        s(498, dpi),
+        s(140, dpi),
         s(460, dpi),
         s(300, dpi),
         Some(parent),
