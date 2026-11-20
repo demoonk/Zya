@@ -8,7 +8,7 @@
 //! white text in dark theme, black text in light theme, without a colored plate.
 
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, SIZE, WPARAM};
@@ -24,10 +24,10 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
-    DestroyMenu, DestroyWindow, GetCursorPos, PostMessageW, RegisterClassW, SetForegroundWindow,
-    ShowWindow, TrackPopupMenu, HICON, IMAGE_FLAGS, MF_CHECKED, MF_STRING, SW_HIDE, TPM_LEFTALIGN,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_COMMAND, WM_DESTROY, WM_NULL, WNDCLASSW,
-    WS_OVERLAPPEDWINDOW,
+    DestroyIcon, DestroyMenu, DestroyWindow, GetCursorPos, PostMessageW, RegisterClassW,
+    SetForegroundWindow, ShowWindow, TrackPopupMenu, HICON, IMAGE_FLAGS, MF_CHECKED, MF_STRING,
+    SW_HIDE, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_COMMAND,
+    WM_DESTROY, WM_NULL, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 
 // `GetDpiForWindow` lives in `Win32::UI::HiDpi`, which this crate's Cargo.toml
@@ -320,7 +320,9 @@ fn tray_icon_resource(is_ru: bool, auto: bool, dark: bool) -> Vec<u8> {
     let mut data = Vec::new();
     data.extend(&40u32.to_le_bytes());
     data.extend(&(ICON_SIZE as u32).to_le_bytes());
-    data.extend(&(ICON_SIZE as u32).to_le_bytes());
+    // An RT_ICON/DIB resource stores the XOR image and the AND mask as one
+    // bitmap whose header height covers *both* of them: 2 x 32.
+    data.extend(&((ICON_SIZE * 2) as u32).to_le_bytes());
     data.extend(&1u16.to_le_bytes());
     data.extend(&32u16.to_le_bytes());
     data.extend(&0u32.to_le_bytes());
@@ -364,8 +366,23 @@ unsafe fn create_tray_icon(is_ru: bool, auto: bool, dark: bool) -> HICON {
     if data.is_empty() {
         return HICON(std::ptr::null_mut());
     }
+    // CreateIconFromResourceEx reads the DIB as a stream of DWORDs and the docs
+    // require presbits to be DWORD-aligned. A Vec<u32> allocation is aligned to
+    // 4 by construction, so the resource is copied through one before handing
+    // it to GDI.
+    let words: Vec<u32> = data
+        .chunks(4)
+        .map(|chunk| {
+            let mut buf = [0u8; 4];
+            buf[..chunk.len()].copy_from_slice(chunk);
+            u32::from_le_bytes(buf)
+        })
+        .collect();
+    let bytes = unsafe {
+        std::slice::from_raw_parts(words.as_ptr() as *const u8, words.len() * 4)
+    };
     CreateIconFromResourceEx(
-        &data,
+        bytes,
         true,
         0x0003_0000,
         ICON_SIZE,
@@ -375,8 +392,31 @@ unsafe fn create_tray_icon(is_ru: bool, auto: bool, dark: bool) -> HICON {
     .unwrap_or(HICON(std::ptr::null_mut()))
 }
 
+/// One HICON per (layout, auto, theme), built once and reused.
+///
+/// `Shell_NotifyIconW` keeps the handle the shell was given, and the Win32 docs
+/// say a handle created with CreateIconFromResourceEx must be released with
+/// DestroyIcon. Creating a fresh icon on every refresh (the hook fires on every
+/// layout switch, and keep_alive() runs every 8 s) leaked one GDI object per
+/// call for the whole lifetime of the process, so the handles are cached here
+/// and only ever freed when the theme changes and the old palette is dropped.
+// HICON is a raw pointer and is not Send, so the cache stores the handles as
+// usize and rebuilds the wrapper at each use.
+static TRAY_ICONS: OnceLock<Mutex<[usize; 8]>> = OnceLock::new();
+
 fn icon_for(is_ru: bool, auto: bool) -> HICON {
-    unsafe { create_tray_icon(is_ru, auto, crate::theme::is_dark()) }
+    let dark = crate::theme::is_dark();
+    let slot = variant(is_ru, auto) * 2 + (dark as usize);
+    let table = TRAY_ICONS.get_or_init(|| Mutex::new([0; 8]));
+    let mut guard = match table.lock() {
+        Ok(g) => g,
+        Err(_) => return unsafe { create_tray_icon(is_ru, auto, dark) },
+    };
+    if guard[slot] == 0 {
+        let h = unsafe { create_tray_icon(is_ru, auto, dark) };
+        guard[slot] = h.0 as usize;
+    }
+    HICON(guard[slot] as *mut std::ffi::c_void)
 }
 
 /// (russian layout, auto on) -> index into the icon table.
@@ -729,12 +769,250 @@ pub fn detach(hwnd: HWND) {
         };
         let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
         let _ = DestroyWindow(hwnd);
+        // Only after the shell has dropped the icon may the handles be freed.
+        if let Some(table) = TRAY_ICONS.get() {
+            if let Ok(mut guard) = table.lock() {
+                for handle in guard.iter_mut() {
+                    if *handle != 0 {
+                        let _ = DestroyIcon(HICON(*handle as *mut std::ffi::c_void));
+                        *handle = 0;
+                    }
+                }
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::Graphics::Gdi::{BITMAP, CreateDIBSection, GetObjectW};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DrawIconEx, GetIconInfo, ICONINFO, DI_NORMAL,
+    };
+
+    /// Draw an HICON into a fresh 32-bit DIB pre-filled with `bg`, and return the
+    /// pixels GDI really composited (row 0 = top, BGRA).
+    unsafe fn render_icon(icon: HICON, size: i32, bg: (u8, u8, u8)) -> Vec<u8> {
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: size,
+                biHeight: -size, // top-down
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: 0,
+                biSizeImage: (size * size * 4) as u32,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let dc = CreateCompatibleDC(None);
+        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let bitmap = match CreateDIBSection(Some(dc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0) {
+            Ok(b) => b,
+            Err(_) => {
+                let _ = DeleteDC(dc);
+                return Vec::new();
+            }
+        };
+        let pixels =
+            std::slice::from_raw_parts_mut(bits as *mut u8, (size * size * 4) as usize);
+        for chunk in pixels.chunks_mut(4) {
+            chunk[0] = bg.0;
+            chunk[1] = bg.1;
+            chunk[2] = bg.2;
+            chunk[3] = 255;
+        }
+
+        SelectObject(dc, bitmap.into());
+        let _ = DrawIconEx(dc, 0, 0, icon, size, size, 0, None, DI_NORMAL);
+        let out = pixels.to_vec();
+        let _ = DeleteObject(bitmap.into());
+        let _ = DeleteDC(dc);
+        out
+    }
+
+    /// Minimal 24-bit BMP writer so the previews can be opened by any viewer.
+    /// `rgb` is top-down RGB; BMP stores rows bottom-up with B,G,R triples.
+    fn write_bmp(path: &str, width: i32, height: i32, rgb: &[u8]) {
+        let stride = (width as usize) * 3;
+        let mut bm = Vec::new();
+        bm.extend(b"BM");
+        bm.extend(&((14 + 40 + rgb.len()) as u32).to_le_bytes());
+        bm.extend(&0u32.to_le_bytes());
+        bm.extend(&54u32.to_le_bytes());
+        bm.extend(&40u32.to_le_bytes());
+        bm.extend(&(width as u32).to_le_bytes());
+        bm.extend(&(height as u32).to_le_bytes());
+        bm.extend(&1u16.to_le_bytes());
+        bm.extend(&24u16.to_le_bytes());
+        bm.extend(&0u32.to_le_bytes());
+        bm.extend(&(rgb.len() as u32).to_le_bytes());
+        bm.extend(&0i32.to_le_bytes());
+        bm.extend(&0i32.to_le_bytes());
+        bm.extend(&0u32.to_le_bytes());
+        bm.extend(&0u32.to_le_bytes());
+        for row in (0..height as usize).rev() {
+            for px in 0..width as usize {
+                let i = row * stride + px * 3;
+                bm.extend(&[rgb[i + 2], rgb[i + 1], rgb[i]]);
+            }
+        }
+        std::fs::write(path, bm).expect("preview written");
+    }
+
+    /// Win32 icons carry an AND mask next to the alpha channel. Explorer and the
+    /// task bar still consult the mask when they scale an icon, so every pixel
+    /// with alpha > 0 must have its mask bit set, and every fully transparent
+    /// pixel must have it clear. (The black-spot bug in Chromium/GIMP is exactly
+    /// this rule being broken.)
+    #[test]
+    fn and_mask_agrees_with_the_alpha_channel() {
+        for ru in [true, false] {
+            for auto in [true, false] {
+                for dark in [true, false] {
+                    let data = tray_icon_resource(ru, auto, dark);
+                    let xor = &data[40..40 + BITS_BYTES];
+                    let mask = &data[40 + BITS_BYTES..];
+                    for y in 0..ICON_SIZE {
+                        for x in 0..ICON_SIZE {
+                            let stored_row = (ICON_SIZE - 1 - y) as usize;
+                            let alpha = xor[stored_row * 128 + x as usize * 4 + 3];
+                            let bit = mask[stored_row * 4 + x as usize / 8]
+                                & (1 << (7 - x as usize % 8));
+                            let opaque = alpha > 0;
+                            assert_eq!(
+                                bit != 0,
+                                opaque,
+                                "mask/alpha disagree at {x},{y} for {ru}/{auto}/{dark}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn win32_icon_geometry_matches_the_resource() {
+        let data = tray_icon_resource(true, true, true);
+        // BITMAPINFOHEADER as the icon format defines it.
+        let bi_size = u32::from_le_bytes(data[0..4].try_into().unwrap());
+        let width = i32::try_from(u32::from_le_bytes(data[4..8].try_into().unwrap())).unwrap();
+        let height = i32::try_from(u32::from_le_bytes(data[8..12].try_into().unwrap())).unwrap();
+        let planes = u16::from_le_bytes(data[12..14].try_into().unwrap());
+        let bpp = u16::from_le_bytes(data[14..16].try_into().unwrap());
+        let compression = u32::from_le_bytes(data[16..20].try_into().unwrap());
+        let image_size = u32::from_le_bytes(data[20..24].try_into().unwrap());
+        assert_eq!(bi_size, 40, "biSize must be the 40-byte BITMAPINFOHEADER");
+        assert_eq!(width, ICON_SIZE);
+        // biHeight covers the XOR image *and* the AND mask.
+        assert_eq!(height, ICON_SIZE * 2, "icon DIB height is XOR + AND mask");
+        assert_eq!(planes, 1);
+        assert_eq!(bpp, 32);
+        assert_eq!(compression, 0, "BI_RGB: an icon DIB is never compressed");
+        assert_eq!(image_size, BITS_BYTES as u32);
+        assert_eq!(
+            data.len(),
+            40 + BITS_BYTES + MASK_BYTES,
+            "the resource must carry the XOR image followed by the 1-bit AND mask"
+        );
+
+        let icon = unsafe { create_tray_icon(true, true, true) };
+        assert!(!icon.0.is_null());
+        unsafe {
+            let mut info = ICONINFO::default();
+            GetIconInfo(icon, &mut info).expect("GetIconInfo");
+            let mut bm = BITMAP::default();
+            let got = GetObjectW(
+                info.hbmColor.into(),
+                std::mem::size_of::<BITMAP>() as i32,
+                Some(&mut bm as *mut BITMAP as *mut core::ffi::c_void),
+            );
+            assert!(got > 0, "GetIconInfo gave no color bitmap");
+            assert_eq!(bm.bmWidth, ICON_SIZE, "Windows rescaled the icon");
+            assert_eq!(bm.bmHeight, ICON_SIZE, "Windows rescaled the icon");
+            assert_eq!(bm.bmBitsPixel, 32, "the alpha channel was dropped");
+
+            let mut mask = BITMAP::default();
+            let got_mask = GetObjectW(
+                info.hbmMask.into(),
+                std::mem::size_of::<BITMAP>() as i32,
+                Some(&mut mask as *mut BITMAP as *mut core::ffi::c_void),
+            );
+            assert!(got_mask > 0, "GetIconInfo gave no mask bitmap");
+            // A colour icon carries a mask of the same size, per the ICONINFO docs.
+            assert_eq!(mask.bmWidth, ICON_SIZE);
+            assert_eq!(mask.bmHeight, ICON_SIZE);
+            for &h in &[info.hbmColor, info.hbmMask] {
+                let _ = DeleteObject(h.into());
+            }
+            let _ = DestroyIcon(icon);
+        }
+    }
+
+    #[test]
+    fn win32_keeps_the_tray_icon_transparent() {        // A magenta background must survive everywhere the icon is transparent.
+        for (ru, auto, dark) in [
+            (true, true, true),
+            (false, true, true),
+            (true, true, false),
+            (false, true, false),
+            (true, false, true),
+            (false, false, false),
+        ] {
+            let icon = unsafe { create_tray_icon(ru, auto, dark) };
+            assert!(!icon.0.is_null(), "CreateIconFromResourceEx returned no icon");
+            let px = unsafe { render_icon(icon, ICON_SIZE, (255, 0, 255)) };
+            // The task bar draws tray icons at 16 logical pixels. The letters
+            // must survive that downscale, otherwise the tray looks blank.
+            let small = unsafe { render_icon(icon, 16, (255, 0, 255)) };
+            unsafe {
+                let _ = DestroyIcon(icon);
+            }
+
+            // Corner pixel: transparent in every variant.
+            let corner = &px[0..4];
+            assert_eq!(
+                (corner[2], corner[1], corner[0]),
+                (255, 0, 255),
+                "GDI painted over a transparent corner for ru={ru} auto={auto} dark={dark}"
+            );
+
+            let (want_r, want_g, want_b) = if dark { (255, 255, 255) } else { (0, 0, 0) };
+            let opaque = (0..(ICON_SIZE * ICON_SIZE) as usize).filter(|i| {
+                let p = &px[i * 4..i * 4 + 4];
+                p[2] == want_r && p[1] == want_g && p[0] == want_b
+            });
+            let count = opaque.count();
+            assert!(
+                count >= 150,
+                "glyph only paints {count} px after the GDI round trip (ru={ru} auto={auto} dark={dark})"
+            );
+
+            // Windows scales the 32 px icon down and anti-aliases it, so few
+            // pixels keep the exact theme colour: count everything the icon
+            // actually painted over the magenta background.
+            let touched = (0..256 as usize)
+                .filter(|i| {
+                    let p = &small[i * 4..i * 4 + 4];
+                    (p[2], p[1], p[0]) != (255, 0, 255)
+                })
+                .count();
+            let solid = (0..256 as usize)
+                .filter(|i| {
+                    let p = &small[i * 4..i * 4 + 4];
+                    p[2] == want_r && p[1] == want_g && p[0] == want_b
+                })
+                .count();
+            assert!(
+                touched >= 80 && solid >= 40,
+                "glyph shrinks to {touched} touched / {solid} solid px at the 16 px tray size \
+                (ru={ru} auto={auto} dark={dark})"
+            );
+        }
+    }
 
     #[test]
     fn tray_icons_are_transparent_and_use_theme_text_color() {
@@ -785,19 +1063,8 @@ mod tests {
         ] {
             let data = tray_icon_resource(ru, auto, dark);
             let xor = &data[40..40 + BITS_BYTES];
-            let mut bmp = Vec::new();
-            bmp.extend(&40u32.to_le_bytes());
-            bmp.extend(&(ICON_SIZE as u32).to_le_bytes());
-            bmp.extend(&(ICON_SIZE as u32).to_le_bytes());
-            bmp.extend(&1u16.to_le_bytes());
-            bmp.extend(&24u16.to_le_bytes());
-            bmp.extend(&0u32.to_le_bytes());
-            bmp.extend(&((ICON_SIZE * ICON_SIZE * 3) as u32).to_le_bytes());
-            bmp.extend(&0i32.to_le_bytes());
-            bmp.extend(&0i32.to_le_bytes());
-            bmp.extend(&0u32.to_le_bytes());
-            bmp.extend(&0u32.to_le_bytes());
-            // The icon bitmap rows are stored bottom-up, the BMP rows too.
+            // Top-down RGB, composited over the theme's taskbar colour.
+            let mut rgb = Vec::new();
             for row in 0..ICON_SIZE {
                 for col in 0..ICON_SIZE {
                     let index = (row as usize) * ICON_SIZE as usize + col as usize;
@@ -806,17 +1073,37 @@ mod tests {
                     let g = xor[index * 4 + 1] as f32;
                     let b = xor[index * 4] as f32;
                     let (br, bg, bb) = if dark { (25.0, 21.0, 18.0) } else { (247.0, 245.0, 243.0) };
-                    bmp.extend(&[
-                        (b * a + bb * (1.0 - a)) as u8,
-                        (g * a + bg * (1.0 - a)) as u8,
+                    rgb.extend(&[
                         (r * a + br * (1.0 - a)) as u8,
+                        (g * a + bg * (1.0 - a)) as u8,
+                        (b * a + bb * (1.0 - a)) as u8,
                     ]);
                 }
             }
-            std::fs::write(format!("data/check/{name}.bmp"), bmp)
-                .expect("preview written");
+            write_bmp(&format!("data/check/{name}.png2.bmp"), ICON_SIZE, ICON_SIZE, &rgb);
             std::fs::write(format!("data/check/{name}.icon"), &data)
                 .expect("icon dump written");
+
+            // What GDI actually paints when the shell draws the icon at the
+            // sizes the taskbar really uses (16 and 24 logical pixels).
+            for (draw, tag) in [(32, "32"), (24, "24"), (16, "16")] {
+                let icon = unsafe { create_tray_icon(ru, auto, dark) };
+                let px = unsafe {
+                    let r = render_icon(icon, draw, (255, 0, 255));
+                    let _ = DestroyIcon(icon);
+                    r
+                };
+                let mut drawn = Vec::new();
+                for chunk in px.chunks(4) {
+                    drawn.extend(&[chunk[2], chunk[1], chunk[0]]);
+                }
+                write_bmp(
+                    &format!("data/check/{name}_draw{tag}.bmp"),
+                    draw,
+                    draw,
+                    &drawn,
+                );
+            }
         }
     }
 
