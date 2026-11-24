@@ -1,7 +1,9 @@
 //! Autostart at logon. The old mechanism is the registry Run key. The new one is
 //! a Task Scheduler task, used when the user wants zя to start as an administrator.
 
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use windows::core::PCWSTR;
 use windows::Win32::System::Registry::{
@@ -13,6 +15,16 @@ const KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const VALUE: &str = "zя.exe";
 const TASK: &str = "ZyaAutoStart";
 const OLD_VALUES: &[&str] = &["z.exe", "zя", "zya", "z", "Abrakadabra"];
+
+// schtasks.exe is a console program: without this flag running it from a GUI
+// process can flash a console window on the desktop.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// H-03: `schtasks /query` used to run synchronously before every tray menu,
+/// i.e. on every right click of the icon. The presence of the task is now cached
+/// and refreshed only where the task is created or deleted.
+/// 0 = never looked, 1 = task exists, 2 = task does not exist.
+static TASK_STATE: AtomicU8 = AtomicU8::new(0);
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
@@ -31,16 +43,27 @@ fn open_run(writing: bool) -> Option<HKEY> {
     }
 }
 
-fn has_value(name: &str) -> bool {
+/// One RegOpenKeyExW for the whole check instead of six: `enabled()` is called
+/// from the tray menu, so it should not reopen the key for every old name.
+fn run_key_present() -> bool {
     let Some(key) = open_run(false) else {
         return false;
     };
-    let value = wide(name);
-    let ok = unsafe { RegQueryValueExW(key, PCWSTR(value.as_ptr()), None, None, None, None).is_ok() };
+    let names: Vec<Vec<u16>> = std::iter::once(VALUE)
+        .chain(OLD_VALUES.iter().copied())
+        .map(wide)
+        .collect();
+    let mut present = false;
     unsafe {
+        for name in &names {
+            if RegQueryValueExW(key, PCWSTR(name.as_ptr()), None, None, None, None).is_ok() {
+                present = true;
+                break;
+            }
+        }
         let _ = RegCloseKey(key);
     }
-    ok
+    present
 }
 
 fn write_value(name: &str, data: &str) -> bool {
@@ -48,7 +71,14 @@ fn write_value(name: &str, data: &str) -> bool {
         return false;
     };
     let value = wide(name);
-    let bytes: Vec<u8> = data.encode_utf16().flat_map(|unit| unit.to_le_bytes()).collect();
+    // L-16: a REG_SZ is a UTF-16 string *with* its terminating NUL. Without it
+    // `reg.exe export`, migration tools and any reader that uses lstrlenW walk
+    // past the end of the stored value.
+    let bytes: Vec<u8> = data
+        .encode_utf16()
+        .chain(std::iter::once(0u16))
+        .flat_map(|unit| unit.to_le_bytes())
+        .collect();
     let result = unsafe {
         RegSetValueExW(key, PCWSTR(value.as_ptr()), None, REG_SZ, Some(&bytes))
     };
@@ -72,52 +102,118 @@ fn delete_value(name: &str) -> bool {
 }
 
 fn run_cmd(program: &str, args: &[&str]) -> bool {
-    match std::process::Command::new(program)
+    let mut command = std::process::Command::new(program);
+    command
         .args(args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
-    {
-        Ok(status) => status.success(),
-        Err(_) => false,
-    }
-}
-
-fn remove_old_entries() {
-    delete_value(VALUE);
-    for value in OLD_VALUES {
-        if has_value(value) {
-            delete_value(value);
+        .creation_flags(CREATE_NO_WINDOW);
+    // P-13: `status()` waits for the process to exit. If the Task Scheduler is
+    // wedged (or an antivirus is intercepting the spawn), that wait never ends
+    // and whoever called it is stuck forever. Poll with a deadline and kill the
+    // child when it overruns.
+    let Ok(mut child) = command.spawn() else {
+        return false;
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                return false;
+            }
         }
     }
 }
 
-fn task_exists() -> bool {
+fn remove_old_entries() {
+    // One open for the whole sweep: RegDeleteValueW simply fails for a name that
+    // is not there, so probing each of the six names with its own RegOpenKeyExW
+    // would cost six key opens for nothing.
+    let Some(key) = open_run(true) else {
+        return;
+    };
+    unsafe {
+        for name in std::iter::once(VALUE).chain(OLD_VALUES.iter().copied()) {
+            let value = wide(name);
+            let _ = RegDeleteValueW(key, PCWSTR(value.as_ptr()));
+        }
+        let _ = RegCloseKey(key);
+    }
+}
+
+fn task_exists_now() -> bool {
     run_cmd("schtasks", &["/query", "/tn", TASK])
 }
 
+fn remember_task(exists: bool) {
+    TASK_STATE.store(if exists { 1 } else { 2 }, Ordering::Relaxed);
+}
+
+/// Read the Task Scheduler once, then answer from the cache. Every create/delete
+/// in this module refreshes the cache, so a right click on the tray icon never
+/// spawns schtasks.exe.
+fn task_exists_cached() -> bool {
+    match TASK_STATE.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => {
+            let exists = task_exists_now();
+            remember_task(exists);
+            exists
+        }
+    }
+}
+
+fn refresh_task_cache() -> bool {
+    let exists = task_exists_now();
+    remember_task(exists);
+    exists
+}
+
 fn remove_task() {
-    if task_exists() {
-        run_cmd("schtasks", &["/delete", "/tn", TASK, "/f"]);
+    if task_exists_cached() {
+        if run_cmd("schtasks", &["/delete", "/tn", TASK, "/f"]) {
+            remember_task(false);
+        } else {
+            refresh_task_cache();
+        }
     }
 }
 
 fn create_task(path: &str) -> bool {
     let command = format!("\"{path}\" run headless");
-    run_cmd(
+    let created = run_cmd(
         "schtasks",
         &[
             "/create", "/tn", TASK, "/tr", &command, "/sc", "ONLOGON", "/rl", "HIGHEST", "/f",
         ],
-    )
+    );
+    if created {
+        // schtasks answered "created": no need to spend another process spawn on
+        // a query, the cache can simply say the task is there.
+        remember_task(true);
+    } else {
+        refresh_task_cache();
+    }
+    created
 }
 
 pub fn enabled() -> bool {
-    has_value(VALUE) || OLD_VALUES.iter().any(|v| has_value(v)) || task_exists()
+    run_key_present() || task_exists_cached()
 }
 
 pub fn admin_enabled() -> bool {
-    task_exists()
+    task_exists_cached()
 }
 
 /// Write (or remove) the Run entry. `path` is the executable that Windows will
@@ -172,9 +268,14 @@ pub fn sync_with_config(want: bool, admin: bool) -> bool {
     }
 
     if admin {
-        // Always refresh the task command, even if the task already exists.
+        // L-15: the Run key and the Task Scheduler task both start zя at logon,
+        // so an admin autostart must clear the registry entry first - otherwise
+        // the app launches twice at every logon (the second copy is then killed
+        // by the single-instance check, and the stale path stays in the registry).
+        // remove_old_entries() drops both the current value and the legacy names.
+        remove_old_entries();
         create_task(&path);
-        return task_exists();
+        return task_exists_cached();
     }
 
     // Normal Run key also points to the currently running executable.
@@ -187,7 +288,10 @@ pub fn sync_with_config(want: bool, admin: bool) -> bool {
 pub fn toggle() -> String {
     let next = !enabled();
     let admin = next && admin_enabled();
-    set_with_admin(next, admin, &current_process_exe().display().to_string());
+    let path = current_process_exe().display().to_string();
+    if !set_with_admin(next, admin, &path) {
+        return "не изменён (реестр/Планировщик отказали)".into();
+    }
     if next {
         "включён".into()
     } else {
@@ -219,5 +323,31 @@ mod tests {
     fn old_names_are_cleaned() {
         assert_eq!(super::OLD_VALUES.len(), 5);
         assert!(!super::OLD_VALUES.contains(&"zя.exe"));
+    }
+
+    #[test]
+    fn reg_sz_bytes_end_with_the_nul_terminator() {
+        // L-16: the stored REG_SZ must include the trailing UTF-16 NUL, otherwise
+        // `reg export` and lstrlenW-style readers run past the value.
+        let data = "C:\\zя.exe run headless";
+        let bytes: Vec<u8> = data
+            .encode_utf16()
+            .chain(std::iter::once(0u16))
+            .flat_map(|unit| unit.to_le_bytes())
+            .collect();
+        let units = data.encode_utf16().count();
+        assert_eq!(bytes.len(), (units + 1) * 2);
+        assert_eq!(&bytes[bytes.len() - 2..], &[0, 0]);
+    }
+
+    #[test]
+    fn task_state_cache_is_used_instead_of_schtasks() {
+        use std::sync::atomic::Ordering;
+        super::remember_task(true);
+        assert_eq!(super::TASK_STATE.load(Ordering::Relaxed), 1);
+        assert!(super::task_exists_cached(), "кэш должен отвечать без запуска schtasks");
+        super::remember_task(false);
+        assert_eq!(super::TASK_STATE.load(Ordering::Relaxed), 2);
+        assert!(!super::task_exists_cached());
     }
 }

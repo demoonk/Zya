@@ -103,3 +103,14 @@ abrakadabra/data/tray_*.png
 @AutomationLog.txt
 data/check/
 /screen.png
+
+# Diagnostic dumps from local runs
+abrakadabra/addword*.txt
+abrakadabra/b*.txt
+abrakadabra/test*.txt
+abrakadabra/tabsrun*.txt
+abrakadabra/wintest.txt
+abrakadabra/watch*.txt
+abrakadabra/inject.txt
+abrakadabra/npt.txt
+abrakadabra/data/*.bmp

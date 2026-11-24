@@ -206,6 +206,6 @@ Write-Host 'zя installed.'
 Write-Host "GitHub asset: z.exe"
 Write-Host "Installed app: $AppExe"
 Write-Host "Settings folder: $AppDir"
-Write-Host 'Menu: Автосправление раскладки, Автозапуск при входе, Настройки, Выход'
+Write-Host 'Menu: Автоисправление раскладки, Автозапуск при входе, Настройки, Выход'
 Write-Host 'Hotkeys: Break, Ctrl+Break, Shift+Break, Ctrl+Alt+P'
 Write-Host 'Uninstall: Uninstall.ps1'

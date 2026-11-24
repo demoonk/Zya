@@ -7,7 +7,7 @@
 //! size that still fits the icon, straight into a transparent icon resource:
 //! white text in dark theme, black text in light theme, without a colored plate.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use windows::core::PCWSTR;
@@ -26,8 +26,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
     DestroyIcon, DestroyMenu, DestroyWindow, GetCursorPos, PostMessageW, RegisterClassW,
     SetForegroundWindow, ShowWindow, TrackPopupMenu, HICON, IMAGE_FLAGS, MF_CHECKED, MF_STRING,
-    SW_HIDE, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_COMMAND,
-    WM_DESTROY, WM_NULL, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+    SW_HIDE, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_CLOSE, WM_COMMAND,
+    WM_DESTROY, WM_NULL, WM_APP, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 
 // `GetDpiForWindow` lives in `Win32::UI::HiDpi`, which this crate's Cargo.toml
@@ -38,6 +38,8 @@ extern "system" {
 }
 
 const WM_TRAYICON: u32 = 0x1111;
+/// `WM_APP + 1`: "config.json changed in another process, read it again" (L-10).
+const WM_RELOAD_CONFIG: u32 = WM_APP + 1;
 const CMD_TOGGLE: usize = 1;
 const CMD_AUTOSTART: usize = 2;
 const CMD_SETTINGS: usize = 3;
@@ -89,7 +91,14 @@ unsafe fn ink_samples(hdc: HDC, font: HFONT, text: &[u16], x: i32, y: i32) -> Ve
         return Vec::new();
     }
     // Draw into a bitmap, not into the DC's own 1x1 placeholder.
-    SelectObject(hdc, bitmap.into());
+    //
+    // MSDN requires an object to be unselected in the DC before it is deleted, so the
+    // bitmap the context had before is put back before this one is freed. The font is
+    // left selected here on purpose: it belongs to the caller, and restoring whatever
+    // was selected earlier could hand the DC a font handle that `free_font` has already
+    // released. `free_font` selects the placeholder before freeing, and
+    // `icon_building_does_not_leak_gdi_objects` measures the result with GetGuiResources.
+    let previous_bitmap = SelectObject(hdc, bitmap.into());
     SelectObject(hdc, font.into());
     SetTextColor(hdc, COLORREF(0x00FF_FFFF));
     SetBkColor(hdc, COLORREF(0));
@@ -119,7 +128,12 @@ unsafe fn ink_samples(hdc: HDC, font: HFONT, text: &[u16], x: i32, y: i32) -> Ve
         &mut bmi,
         DIB_RGB_COLORS,
     );
-    let _ = DeleteObject(bitmap.into());
+    // Hand the DC back its original bitmap: only an unselected bitmap can be freed.
+    SelectObject(hdc, previous_bitmap);
+    let freed = DeleteObject(bitmap.into()).as_bool();
+    if !freed && crate::win::verbose() {
+        println!("zя: DeleteObject не освободил DIB иконки");
+    }
 
     if !drawn || rows <= 0 {
         return Vec::new();
@@ -159,6 +173,26 @@ fn ink_bbox(samples: &[u8]) -> (i32, i32, i32, i32) {
 unsafe fn letter_coverages(label: &str) -> (Vec<u8>, (i32, i32, i32, i32)) {
     let text: Vec<u16> = label.encode_utf16().collect();
     let hdc = CreateCompatibleDC(None);
+    if hdc.0.is_null() {
+        return (vec![0u8; (ICON_SIZE * ICON_SIZE) as usize], (0, 0, 0, 0));
+    }
+
+    // A font the DC keeps selected between measurements. An object must not still be
+    // selected in a context when it is deleted, so every measured font is swapped
+    // back to this placeholder before DeleteObject - and never to a handle we have
+    // already freed.
+    let idle_font = segoe_ui_bold(1);
+    SelectObject(hdc, idle_font.into());
+
+    /// Release a font that `ink_samples`/`GetTextExtentPoint32W` no longer needs.
+    /// 120 fonts are built for every icon, so each one has to be unselected from
+    /// the context before it is freed.
+    unsafe fn free_font(hdc: HDC, idle: HFONT, font: HFONT) {
+        SelectObject(hdc, idle.into());
+        if !DeleteObject(font.into()).as_bool() && crate::win::verbose() {
+            println!("zя: шрифт значка не освобождён (он ещё выбран в DC)");
+        }
+    }
 
     // First pass: the advance width reported by GDI bounds the font size. It
     // includes the side bearings, so the ink itself can still afford a couple of
@@ -168,6 +202,9 @@ unsafe fn letter_coverages(label: &str) -> (Vec<u8>, (i32, i32, i32, i32)) {
     let mut advance_em = 1;
     for em in 1..=MAX_INK {
         let font = segoe_ui_bold(em);
+        if font.0.is_null() {
+            continue;
+        }
         SelectObject(hdc, font.into());
         if GetTextExtentPoint32W(hdc, &text, &mut extent).as_bool()
             && extent.cx <= MAX_INK
@@ -175,14 +212,18 @@ unsafe fn letter_coverages(label: &str) -> (Vec<u8>, (i32, i32, i32, i32)) {
         {
             advance_em = em;
         }
-        let _ = DeleteObject(font.into());
+        free_font(hdc, idle_font, font);
     }
 
     let (mut em_used, mut samples) = (0, Vec::new());
     for em in advance_em..=advance_em + 8 {
         let font = segoe_ui_bold(em);
+        if font.0.is_null() {
+            break;
+        }
+        SelectObject(hdc, font.into());
         let probe = ink_samples(hdc, font, &text, 0, 0);
-        let _ = DeleteObject(font.into());
+        free_font(hdc, idle_font, font);
         if probe.is_empty() {
             break;
         }
@@ -196,8 +237,9 @@ unsafe fn letter_coverages(label: &str) -> (Vec<u8>, (i32, i32, i32, i32)) {
     }
     if samples.is_empty() {
         let font = segoe_ui_bold(advance_em);
+        SelectObject(hdc, font.into());
         samples = ink_samples(hdc, font, &text, 0, 0);
-        let _ = DeleteObject(font.into());
+        free_font(hdc, idle_font, font);
         em_used = advance_em;
     }
 
@@ -207,10 +249,18 @@ unsafe fn letter_coverages(label: &str) -> (Vec<u8>, (i32, i32, i32, i32)) {
     let dx = (SS_SIZE - (x1 - x0 + 1)) / 2 - x0;
     let dy = (SS_SIZE - (y1 - y0 + 1)) / 2 - y0;
     let font = segoe_ui_bold(em_used);
+    SelectObject(hdc, font.into());
     let centred = ink_samples(hdc, font, &text, dx, dy);
-    let _ = DeleteObject(font.into());
+    free_font(hdc, idle_font, font);
     let _ = DeleteDC(hdc);
+    // The DC is gone, so the placeholder is no longer selected anywhere.
+    let _ = DeleteObject(idle_font.into());
     let centred = if centred.is_empty() { samples } else { centred };
+    if centred.is_empty() {
+        // GDI gave us nothing to draw with; return an empty icon instead of
+        // indexing past the end of the sample grid.
+        return (vec![0u8; (ICON_SIZE * ICON_SIZE) as usize], (0, 0, 0, 0));
+    }
     let (x0, y0, x1, y1) = ink_bbox(&centred);
 
     let mut grid = vec![0u8; (ICON_SIZE * ICON_SIZE) as usize];
@@ -408,10 +458,10 @@ fn icon_for(is_ru: bool, auto: bool) -> HICON {
     let dark = crate::theme::is_dark();
     let slot = variant(is_ru, auto) * 2 + (dark as usize);
     let table = TRAY_ICONS.get_or_init(|| Mutex::new([0; 8]));
-    let mut guard = match table.lock() {
-        Ok(g) => g,
-        Err(_) => return unsafe { create_tray_icon(is_ru, auto, dark) },
-    };
+    // A mutex that got poisoned by a panic still holds its data: taking it back
+    // (like the rest of the codebase does) keeps the icon cache working instead
+    // of building - and leaking - a fresh HICON on every refresh.
+    let mut guard = table.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if guard[slot] == 0 {
         let h = unsafe { create_tray_icon(is_ru, auto, dark) };
         guard[slot] = h.0 as usize;
@@ -431,6 +481,9 @@ fn variant(is_ru: bool, auto: bool) -> usize {
 
 static TRAY_HWND: OnceLock<usize> = OnceLock::new();
 static LAST_VARIANT: AtomicU8 = AtomicU8::new(255);
+/// Set by `detach`: the keep-alive thread checks it and stops poking a window
+/// that no longer exists.
+static TRAY_STOPPED: AtomicBool = AtomicBool::new(false);
 
 /// The "tuck the menu a little above the icon" margin. `GetCursorPos` reports
 /// physical screen pixels while the 4 px margin is a logical one, so at 150%
@@ -486,6 +539,9 @@ unsafe fn notify(hwnd: HWND, is_ru: bool, auto: bool, add: bool) -> bool {
 
 /// Called from the hook whenever the tracked layout or the auto flag changes.
 pub fn refresh(is_ru: bool, auto: bool) {
+    if TRAY_STOPPED.load(Ordering::Relaxed) {
+        return;
+    }
     let Some(&hwnd) = TRAY_HWND.get() else {
         return;
     };
@@ -527,17 +583,31 @@ pub fn probe() {
 /// shell may not be ready when NIM_ADD runs. Re-checking every few seconds makes
 /// the menu available without a reinstall.
 pub fn keep_alive() {
-    std::thread::spawn(|| loop {
-        std::thread::sleep(std::time::Duration::from_secs(8));
-        let Some(&hwnd) = TRAY_HWND.get() else {
-            return;
-        };
-        let is_ru = crate::win::current_layout_is_russian();
-        let auto = crate::win::auto_enabled();
-        unsafe {
-            let h = HWND(hwnd as *mut std::ffi::c_void);
-            if !notify(h, is_ru, auto, false) {
-                notify(h, is_ru, auto, true);
+    std::thread::spawn(|| {
+        // Eight seconds between checks, watched in quarter-second steps: after
+        // `detach` the thread must leave rather than spend another eight seconds
+        // calling Shell_NotifyIconW with a window that has been destroyed.
+        let tick = std::time::Duration::from_millis(250);
+        loop {
+            for _ in 0..32 {
+                if TRAY_STOPPED.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(tick);
+            }
+            if TRAY_STOPPED.load(Ordering::Relaxed) {
+                return;
+            }
+            let Some(&hwnd) = TRAY_HWND.get() else {
+                return;
+            };
+            let is_ru = crate::win::current_layout_is_russian();
+            let auto = crate::win::auto_enabled();
+            unsafe {
+                let h = HWND(hwnd as *mut std::ffi::c_void);
+                if !notify(h, is_ru, auto, false) {
+                    notify(h, is_ru, auto, true);
+                }
             }
         }
     });
@@ -600,7 +670,7 @@ unsafe fn show_menu(hwnd: HWND) {
         menu,
         if auto { MF_CHECKED } else { MF_STRING },
         CMD_TOGGLE,
-        PCWSTR(wide("Автосправление раскладки").as_ptr()),
+        PCWSTR(wide("Автоисправление раскладки").as_ptr()),
     );
     let _ = AppendMenuW(
         menu,
@@ -636,20 +706,47 @@ unsafe fn show_menu(hwnd: HWND) {
     // Release the foreground grab so the next click on the icon is delivered.
     let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
 
-    match cmd.0 as usize {
+    handle_command(cmd.0 as usize);
+}
+
+/// The single place where a menu command is acted on. `TrackPopupMenu` is called
+/// with `TPM_RETURNCMD`, so this is the only route that really fires; the
+/// `WM_COMMAND` branch of `wndproc` (kept for shells that still post the message)
+/// calls the same function, so the two can no longer drift apart.
+unsafe fn handle_command(cmd: usize) {
+    match cmd {
         CMD_TOGGLE => crate::win::toggle_auto(),
         CMD_AUTOSTART => {
-            let exe = crate::autostart::toggle();
-            println!("zя: автозапуск {}", exe);
+            // Before this, the tray menu only touched the registry / Task
+            // Scheduler while `main` re-synced them from config.json on the next
+            // start - the toggle looked dead after a restart.
+            let state = crate::autostart::toggle();
+            let mut cfg = crate::config::load();
+            cfg.autostart = crate::autostart::enabled();
+            cfg.admin_autostart = crate::autostart::admin_enabled();
+            match crate::config::save(&cfg) {
+                Ok(()) => println!(
+                    "zя: автозапуск {state}, записано в config.json (autostart={}, admin={})",
+                    cfg.autostart, cfg.admin_autostart
+                ),
+                Err(e) => println!("zя: автозапуск {state}, но config.json не сохранён: {e}"),
+            }
         }
         CMD_SETTINGS => {
-            let _ = crate::settings::open();
+            // The settings window owns a GetMessage loop. Running it inside the
+            // tray window procedure nests a second message loop in the tray
+            // thread: the icon stops answering while the window is open, and a
+            // second click nests a third loop. settings_ui refuses to open a
+            // second window, so a plain spawn is safe.
+            std::thread::spawn(|| {
+                if let Err(e) = crate::settings::open_blocking() {
+                    if crate::win::verbose() {
+                        println!("zя: окно настроек не открылось: {e}");
+                    }
+                }
+            });
         }
-        CMD_QUIT => {
-            detach(hwnd);
-            crate::win::remove_hook();
-            std::process::exit(0);
-        }
+        CMD_QUIT => quit_now(),
         // 0 means the menu was dismissed without a selection.
         _ => {}
     }
@@ -658,25 +755,10 @@ unsafe fn show_menu(hwnd: HWND) {
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_COMMAND => {
-            let cmd = wparam.0 & 0xFFFF;
-            match cmd {
-                CMD_TOGGLE => {
-                    crate::win::toggle_auto();
-                }
-                CMD_AUTOSTART => {
-                    let exe = crate::autostart::toggle();
-                    println!("zя: автозапуск {}", exe);
-                }
-                CMD_SETTINGS => {
-                    let _ = crate::settings::open();
-                }
-                CMD_QUIT => {
-                    detach(hwnd);
-                    crate::win::remove_hook();
-                    std::process::exit(0);
-                }
-                _ => {}
-            }
+            // With TPM_RETURNCMD the command comes back from TrackPopupMenu
+            // instead of arriving here; the low 16 bits still identify the item
+            // when a shell does post WM_COMMAND. Same handler as the menu path.
+            handle_command(wparam.0 & 0xFFFF);
             LRESULT(0)
         }
         WM_TRAYICON => {
@@ -693,7 +775,22 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             LRESULT(0)
         }
+        WM_CLOSE => {
+            // Graceful shutdown asked for by `zя stop` / the installer: drop the
+            // icon, unhook, then leave.
+            quit_now();
+            LRESULT(0)
+        }
         WM_DESTROY => LRESULT(0),
+        // L-10: a CLI command in another process (`z.exe dict add`, `exclude add`)
+        // rewrote config.json. The resident copy re-reads it and refreshes the icon.
+        WM_RELOAD_CONFIG => {
+            crate::win::reload_config_from_disk();
+            let is_ru = crate::win::current_layout_is_russian();
+            let auto = crate::win::auto_enabled();
+            notify(hwnd, is_ru, auto, false);
+            LRESULT(0)
+        }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
@@ -759,8 +856,25 @@ pub fn attach() -> anyhow::Result<HWND> {
     }
 }
 
+/// Detach the icon, remove the hook and leave. Used by the tray menu, by
+/// `WM_CLOSE` and by the stop flag, so every exit route is the same one.
+pub fn quit_now() {
+    // The settings window may still be open on its own thread with a keyboard
+    // hook installed; dropping the hook before the process exits makes sure no
+    // keystroke is filtered while Windows tears the process down.
+    crate::settings_ui::release_capture_hook();
+    if let Some(&hwnd) = TRAY_HWND.get() {
+        detach(HWND(hwnd as *mut std::ffi::c_void));
+    }
+    crate::win::remove_hook();
+    std::process::exit(0);
+}
+
 pub fn detach(hwnd: HWND) {
     unsafe {
+        // Stop the keep-alive thread first: it would otherwise keep calling
+        // Shell_NotifyIconW with a handle this window no longer has.
+        TRAY_STOPPED.store(true, Ordering::Relaxed);
         let nid = NOTIFYICONDATAW {
             cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
             hWnd: hwnd,
@@ -771,12 +885,11 @@ pub fn detach(hwnd: HWND) {
         let _ = DestroyWindow(hwnd);
         // Only after the shell has dropped the icon may the handles be freed.
         if let Some(table) = TRAY_ICONS.get() {
-            if let Ok(mut guard) = table.lock() {
-                for handle in guard.iter_mut() {
-                    if *handle != 0 {
-                        let _ = DestroyIcon(HICON(*handle as *mut std::ffi::c_void));
-                        *handle = 0;
-                    }
+            let mut guard = table.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            for handle in guard.iter_mut() {
+                if *handle != 0 {
+                    let _ = DestroyIcon(HICON(*handle as *mut std::ffi::c_void));
+                    *handle = 0;
                 }
             }
         }
@@ -1183,5 +1296,52 @@ mod tests {
         assert_eq!(menu_margin(120), 5); // 125 %
         assert_eq!(menu_margin(144), 6); // 150 %
         assert_eq!(menu_margin(192), 8); // 200 %
+    }
+
+    /// P-01: building an icon used to leak 120 HFONTs and up to 11 64 KB DIBs,
+    /// because every `DeleteObject` was called while the object was still the one
+    /// selected in the DC - and Windows refuses to free a selected object.
+    /// `GetGuiResources` is the direct witness: 20 renders must not move the count.
+    #[test]
+    fn icon_building_does_not_leak_gdi_objects() {
+        use windows::Win32::System::Threading::{
+            GetCurrentProcess, GetGuiResources, GR_GDIOBJECTS,
+        };
+        unsafe {
+            let before = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
+            for i in 0..20 {
+                let data = tray_icon_resource(i % 2 == 0, i % 3 == 0, i % 4 == 0);
+                assert_eq!(data.len(), 40 + BITS_BYTES + MASK_BYTES);
+            }
+            let after = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
+            let delta = after as i64 - before as i64;
+            // Other tests may hold a handful of objects at the same time; the old
+            // code grew this by roughly 2600 (130 per render).
+            assert!(
+                delta <= 40,
+                "GDI objects grew by {delta} over 20 icon renders (before {before}, after {after})"
+            );
+            println!("tray GDI check: before {before}, after 20 renders {after} (delta {delta})");
+        }
+    }
+
+    /// The ownership rule the fix enforces: the DC is handed back the object it had
+    /// before, so the bitmap the caller owns is released (DeleteObject really returns
+    /// TRUE) and nothing is left selected in a context that outlives the call.
+    #[test]
+    fn ink_bitmap_is_unselected_before_it_is_deleted() {
+        unsafe {
+            let dc = CreateCompatibleDC(None);
+            assert!(!dc.0.is_null(), "CreateCompatibleDC failed");
+            let bitmap = CreateCompatibleBitmap(dc, SS_SIZE, SS_SIZE);
+            assert!(!bitmap.0.is_null(), "CreateCompatibleBitmap failed");
+            let previous = SelectObject(dc, bitmap.into());
+            SelectObject(dc, previous);
+            assert!(
+                DeleteObject(bitmap.into()).as_bool(),
+                "DIB не освобождён после того, как в DC вернули прежний объект"
+            );
+            let _ = DeleteDC(dc);
+        }
     }
 }

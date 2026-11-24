@@ -3,6 +3,7 @@
 //! binary, so the switcher has no external data files at runtime.
 
 use std::collections::{HashMap, HashSet};
+use std::cmp::Ordering;
 
 use serde::Deserialize;
 
@@ -42,6 +43,10 @@ pub struct Lang {
     tri_unseen: f32,
     baseline: Vec<f32>,
     words: HashMap<String, f32>,
+    /// The dictionary keys sorted by frequency (ties broken alphabetically),
+    /// computed once at load time so `top_words` is both correct and
+    /// deterministic across runs (L-13).
+    top: Vec<String>,
     /// Every three-letter tail that really closes a word of this language.
     endings: HashSet<usize>,
 }
@@ -76,6 +81,17 @@ impl Lang {
         // are not words. Removing them would also remove rare but genuine forms
         // like "мышью", so the dictionary is kept whole and the rules decide.
         let words: HashMap<String, f32> = raw.words.into_iter().collect();
+        // L-13: "top words" must be the *most frequent* ones, in a stable order.
+        // Iterating a HashMap gives a seed-dependent sequence, which made the
+        // accuracy tests flaky from run to run.
+        let mut ranked: Vec<(String, f32)> =
+            words.iter().map(|(w, &lp)| (w.clone(), lp)).collect();
+        ranked.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        let top: Vec<String> = ranked.into_iter().map(|(w, _)| w).collect();
         let mut endings: HashSet<usize> = HashSet::with_capacity(words.len());
         for w in words.keys() {
             let tail: Vec<usize> = w.chars().filter_map(|c| idx.get(&c).copied()).collect();
@@ -94,6 +110,7 @@ impl Lang {
             tri_unseen: raw.tri_unseen,
             baseline: raw.baseline,
             words,
+            top,
             endings,
         }
     }
@@ -211,7 +228,7 @@ impl Lang {
     }
 
     pub fn top_words(&self, k: usize) -> Vec<String> {
-        self.words.keys().take(k).cloned().collect()
+        self.top.iter().take(k).cloned().collect()
     }
 }
 

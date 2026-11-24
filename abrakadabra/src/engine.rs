@@ -2,6 +2,7 @@
 //! produced with the wrong keyboard layout.
 
 use crate::layout::{is_ambiguous, map_key, script_of, Script};
+use crate::lexicon::Lexicon;
 use crate::model::Model;
 
 pub const INVALID: f32 = -1000.0;
@@ -60,6 +61,12 @@ pub struct Config {
     pub protect_code: bool,
     /// Words the user never wants touched.
     pub whitelist: Vec<String>,
+    /// Extra short Russian function words (1-3 letters) added to the built-in
+    /// dictionary of service words.
+    pub short_ru: Vec<String>,
+    /// Extra short English function words and abbreviations: they are protected
+    /// from mirroring even though they look like Russian words turned inside out.
+    pub short_en: Vec<String>,
     /// Window/process substrings where the switcher must not act.
     pub exclude_processes: Vec<String>,
     /// Folder prefixes: if the foreground program lives under one of these
@@ -84,8 +91,24 @@ pub struct Config {
     pub hotkey_selection: String,
     /// Force the selected text to UPPER CASE. Default: Ctrl+Break.
     pub hotkey_upper: String,
+    /// Force the last typed token to UPPER CASE when nothing is selected.
+    /// It may hold the same combination as `hotkey_upper`: one key then means
+    /// "выделение, а если его нет — последнее слово". Default: Ctrl+Break.
+    pub hotkey_upper_last: String,
     /// Swap the case of the selected text. Default: Shift+Break.
     pub hotkey_invert: String,
+    /// Swap the case of the last typed token when nothing is selected.
+    /// Default: Shift+Break.
+    pub hotkey_invert_last: String,
+    /// Add the selected word to the dictionary the engine protects.
+    /// Default: Ctrl+` (the key that types ё on a Russian layout).
+    pub hotkey_add_word: String,
+    /// "Умная отмена". When on, Break reads the punctuation keys that the
+    /// automatic layer ate (ю/б/ж at the end of a token as `.` `,` `;`) and the
+    /// second press returns the exact text that was there before, instead of
+    /// mirroring the token once more. When off, every press mirrors the whole
+    /// token, as in the classic version. Default: true.
+    pub smart_undo: bool,
 }
 
 impl Default for Config {
@@ -102,7 +125,11 @@ impl Default for Config {
             hotkey_last: "break".into(),
             hotkey_selection: "break".into(),
             hotkey_upper: "ctrl+break".into(),
+            hotkey_upper_last: "ctrl+break".into(),
             hotkey_invert: "shift+break".into(),
+            hotkey_invert_last: "shift+break".into(),
+            hotkey_add_word: "ctrl+`".into(),
+            smart_undo: true,
             whitelist: vec![
                 "ok".into(),
                 "git".into(),
@@ -135,6 +162,8 @@ impl Default for Config {
                 "dll".into(),
                 "file".into(),
             ],
+            short_ru: vec![],
+            short_en: vec![],
             exclude_processes: vec![
                 "cmd.exe".into(),
                 "powershell".into(),
@@ -174,6 +203,12 @@ pub enum TargetLayout {
 pub struct Engine {
     pub model: Model,
     pub cfg: Config,
+    /// Ground truth for one-to-three-letter service words, built from the
+    /// built-in lists plus whatever the user added in the settings.
+    pub lexicon: Lexicon,
+    /// Reasons why the last tokens were left alone. Kept for the mistake report
+    /// (`errtest`), which needs the explanation, not just the printed trace.
+    notes: std::sync::Mutex<Vec<String>>,
 }
 
 /// Diagnostic output: with ZYA_VERBOSE every reason a token is *not* touched is
@@ -198,9 +233,120 @@ fn split_word_end(token: &str) -> Option<(&str, char)> {
     Some((head, tail))
 }
 
+/// The punctuation sitting under a Russian letter that lives on a punctuation
+/// key: б ю ж are `,` `.` `;`, and their capitals (the shifted layer of the
+/// same physical keys) are `.` `,` `:`.
+fn punct_key(c: char) -> char {
+    match c {
+        'б' => ',',
+        'ю' => '.',
+        'ж' => ';',
+        'Б' => '.',
+        'Ю' => ',',
+        'Ж' => ':',
+        _ => ',',
+    }
+}
+
+/// Endings that a real Russian word carries on the punctuation key: the
+/// first-person "-ю" of "колю"/"стулю"/"плюлю", the soft "-ью" of "мышью", the
+/// doubled "-юю" of "своюю", the accusative "-ую" of "цветную". Everything else
+/// that ends a Russian word on `,` `.` or `;` is the key, not a letter.
+fn is_letter_tail(word: &str) -> bool {
+    let chars: Vec<char> = word.chars().collect();
+    if chars.len() < 2 {
+        return false;
+    }
+    let tail: String = chars[chars.len() - 2..]
+        .iter()
+        .map(|&c| c.to_lowercase().next().unwrap_or(c))
+        .collect();
+    matches!(tail.as_str(), "лю" | "ью" | "юю" | "ую")
+}
+
+/// A tail made only of ordinary punctuation: `.` `,` `;` `:` `!` `?` `)` `]`.
+/// These keys are the same physical key in both layouts only for `б`/`ю`/`ж`,
+/// which the caller has already excluded.
+fn is_plain_punctuation(s: &str) -> bool {
+    s.chars()
+        .all(|c| matches!(c, ',' | '.' | ';' | ':' | '!' | '?' | ')' | ']'))
+}
+
 impl Engine {
     pub fn new(model: Model, cfg: Config) -> Engine {
-        Engine { model, cfg }
+        Engine {
+            lexicon: Lexicon::with_extra(&cfg.short_ru, &cfg.short_en),
+            model,
+            cfg,
+            notes: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Record why a token was not touched: printed when tracing is on, and kept
+    /// in a buffer so a test can ask for the reason instead of reading stderr.
+    fn note(&self, msg: String) {
+        if traced() {
+            eprintln!("{msg}");
+        }
+        self.notes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(msg);
+    }
+
+    /// Take (and clear) the reasons collected since the last call.
+    pub fn take_notes(&self) -> Vec<String> {
+        let mut notes = self.notes.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut *notes)
+    }
+
+    /// Is this a token a person would really type in the language it is written
+    /// in? A dictionary hit, a technical term, a unit from the lexicon, a number
+    /// or an inflected form of a dictionary word ("коронавируса" is the genitive
+    /// of "коронавирус"); everything else has to reach the same plausibility
+    /// floor the automatic layer uses. Break needs it to tell "the whole token
+    /// is in the wrong layout" from "only its last key is".
+    pub fn believable_word(&self, s: &str) -> bool {
+        if s.is_empty() {
+            return false;
+        }
+        let letters: String = s.chars().filter(|c| c.is_alphabetic()).collect();
+        if letters.is_empty() {
+            return s.chars().any(|c| c.is_ascii_digit());
+        }
+        let lang = match script_of(&letters) {
+            Some(Script::Cyrillic) => &self.model.ru,
+            Some(Script::Latin) => &self.model.en,
+            None => return false,
+        };
+        if self.model.is_tech(&letters) {
+            return true;
+        }
+        // Two- and three-letter mirrors are decided by the curated lexicon: the
+        // frequency list is cut off at 50k entries and still carries corpus noise
+        // like "ghb", "lf" and "tot", which are not words of any language.
+        if letters.chars().count() <= 3 {
+            return match script_of(&letters) {
+                Some(Script::Cyrillic) => {
+                    self.lexicon.is_ru(&letters) || self.lexicon.is_ru_abbrev(&letters)
+                }
+                _ => self.lexicon.is_en(&letters),
+            };
+        }
+        if lang.has_word(&letters) {
+            return true;
+        }
+        // A form the frequency list does not carry but which is one letter away
+        // from a word it does: "коронавируса" -> "коронавирус", "заметен" ->
+        // "заметный".
+        if letters.chars().count() >= 4 {
+            let stem: String = letters.chars().take(letters.chars().count() - 1).collect();
+            if lang.has_word(&stem) {
+                return true;
+            }
+        }
+        let floor = self.cfg.plausibility * ((letters.chars().count() as f32) / 6.0).max(1.0);
+        lang.score(&letters).unwrap_or(INVALID) >= floor
     }
 
     /// Keys such as `,` `.` `;` `'` produce punctuation in one layout and a
@@ -464,6 +610,11 @@ impl Engine {
     /// on `,` `.` `;`. The layout stays as it is — nothing else in the run was
     /// typed wrong. Capital Б/Ю/Ж come from the shifted layer of the same keys,
     /// where the English layout has `.` `,` `:`.
+    /// Since no layout change is involved here, an ending that a real Russian
+    /// word can have is kept: "Колю" is a word, "Кол." is not what the user
+    /// typed. A stem that is already a complete word only keeps the letter when
+    /// the ending it forms is one Russian really builds ("-лю", "-ью", "-юю",
+    /// "-ую"); after "конечно" the б key is a comma.
     fn punctuation_decision(&self, token: &str) -> Option<Decision> {
         let chars: Vec<char> = token.chars().collect();
         // How many of the last keys are punctuation typed in the Russian layout.
@@ -477,20 +628,11 @@ impl Engine {
         if run == 0 {
             return None;
         }
-        let last = chars[chars.len() - 1];
-        let punct = match last {
-            'б' => ',',
-            'ю' => '.',
-            'ж' => ';',
-            'Б' => '.',
-            'Ю' => ',',
-            _ => ':',
-        };
         let head: String = chars[..chars.len() - run].iter().collect();
         // "ююю" is "..." : the same key pressed several times, no Russian word
         // is made only of these letters.
         if head.is_empty() {
-            let converted: String = punct.to_string().repeat(chars.len());
+            let converted: String = chars.iter().map(|&c| punct_key(c)).collect();
             return Some(Decision {
                 original: token.to_string(),
                 converted: converted.clone(),
@@ -515,9 +657,7 @@ impl Engine {
         }
         // "клуб", "свобода" ... a real word keeps its letter.
         if self.model.ru.has_word(token) {
-            if traced() {
-                eprintln!("skip {token}: the ending is a real Russian word");
-            }
+            self.note(format!("skip {token}: the ending is a real Russian word"));
             return None;
         }
         // The stem must read as Russian at all: "щдув" (the mirror of OLED)
@@ -530,47 +670,81 @@ impl Engine {
             if mirror.chars().all(|c| c.is_alphabetic()) {
                 let other = self.model.en.score(&mirror).unwrap_or(f32::MIN);
                 if other > ru_head + 10.0 {
-                    if traced() {
-                        eprintln!(
-                            "skip {token}: stem {stem} reads better as {mirror} ({other:.1} vs {ru_head:.1})"
-                        );
-                    }
+                    self.note(format!(
+                        "skip {token}: stem {stem} reads better as {mirror} ({other:.1} vs {ru_head:.1})"
+                    ));
                     return None;
                 }
             }
         }
-        // The decisive question is whether the letter can belong to the word at
-        // all. If the stem on its own is a Russian word ("зумом", "факт"), the
-        // key that follows it was `,` `.` or `;`. Otherwise the whole token has
-        // to close like a real Russian word: "голуб" ends in "луб", which real
-        // words do, while "ктб" closes nothing.
-        let v: Vec<char> = stem.chars().collect();
-        let pair = self
-            .model
-            .ru
-            .bigram_lp(v[v.len() - 1], last)
-            .unwrap_or(f32::MIN);
-        let triple = if v.len() >= 2 {
-            self.model
-                .ru
-                .trigram_lp(v[v.len() - 2], v[v.len() - 1], last)
-                .unwrap_or(f32::MIN)
-        } else {
-            f32::MAX
-        };
-        if !self.model.ru.has_word(&stem)
-            && self.model.ru.ends_like_word(&format!("{stem}{last}"))
-            && pair >= -11.0
-            && triple >= -17.0
-        {
-            if traced() {
-                eprintln!(
-                    "skip {token}: {stem}{last} closes like a real Russian word (pair {pair:.1}, triple {triple:.1})"
-                );
+        // The decisive question is whether a letter of the run can belong to the
+        // word at all. No layout changed here: the keys were pressed while the
+        // keyboard was already Russian, so an ending a real Russian word can have
+        // stays a letter ("Колю", "плюлю"), while an ending no Russian word has
+        // ("фактб" ends in "ктб", "проектЖ" in "ктж") is a `,` `.` or `;` typed
+        // with the layout in the wrong place. The run is read letter by letter
+        // outwards from the stem: "клубю" keeps the "б" of "клуб" and reads the
+        // "ю" as the dot.
+        //
+        // A stem that is already a complete Russian word is the strong case for
+        // punctuation - after "конечно" the б key is a comma. Such a stem only
+        // keeps the letter when the ending it forms is one the language really
+        // builds: the first-person "-ю" of "колю", "стулю", "плюлю". Common forms
+        // like "люблю" and "знаю" are already in the dictionary and never reach
+        // this branch.
+        let mut word: Vec<char> = stem.chars().collect();
+        let mut keep = 0usize;
+        for i in 0..run {
+            let c = chars[chars.len() - run + i];
+            let n = word.len();
+            let pair = self.model.ru.bigram_lp(word[n - 1], c).unwrap_or(f32::MIN);
+            let triple = if n >= 2 {
+                self.model
+                    .ru
+                    .trigram_lp(word[n - 2], word[n - 1], c)
+                    .unwrap_or(f32::MIN)
+            } else {
+                f32::MAX
+            };
+            let growing: String = word.iter().chain(std::iter::once(&c)).collect();
+            if !self.model.ru.ends_like_word(&growing) || pair < -11.0 || triple < -17.0 {
+                break;
             }
+            let before: String = word.iter().collect();
+            // The stem is "already a word" both when it is in the dictionary and
+            // when it is an inflected form of one: "коронавируса" is the genitive
+            // of "коронавирус", so the ю after it is the dot key, not a letter.
+            let stem_is_word = self.model.ru.has_word(&before)
+                || (before.chars().count() >= 4
+                    && self
+                        .model
+                        .ru
+                        .has_word(&before.chars().take(before.chars().count() - 1).collect::<String>()));
+            if stem_is_word && !is_letter_tail(&growing) {
+                self.note(format!("skip {token}: {before} is already a complete word"));
+                break;
+            }
+            word.push(c);
+            keep += 1;
+        }
+        if keep == run {
+            self.note(format!("skip {token}: the ending closes like a real Russian word"));
             return None;
         }
-        let converted = format!("{head}{}", punct.to_string().repeat(run));
+        let prefix: String = chars[..chars.len() - run].iter().collect();
+        let kept: String = word[stem.chars().count()..].iter().collect();
+        let converted = format!(
+            "{}{}{}",
+            prefix,
+            kept,
+            chars[chars.len() - run + keep..]
+                .iter()
+                .map(|&c| punct_key(c))
+                .collect::<String>()
+        );
+        if converted == token {
+            return None;
+        }
         Some(Decision {
             original: token.to_string(),
             converted: converted.clone(),
@@ -727,27 +901,40 @@ impl Engine {
 
     /// A lone Cyrillic letter typed in the wrong layout is almost always a
     /// one-letter Russian word: "d" is "в", "c" is "с", "b" is "и", "r" is "к",
-    /// "e" is "у", "j" is "о", "f" is "а", "z" is "я". The corpus has almost no
-    /// legitimate standalone Latin letters (they all sit inside model numbers
-    /// such as "802.11a/b/g"), so the rule only fires when the previous token is
-    /// Russian text: a Latin letter inside English text keeps its key.
+    /// "e" is "у", "j" is "о", "f" is "а", "z" is "я". The list of one-letter
+    /// words is the dictionary, not a hard-coded array, so a word added in the
+    /// settings takes effect here too. The rule stays contextual: a run of
+    /// single letters ("a b c d") is a list of variants, not a sentence.
     fn lone_letter_decision(&self, token: &str, prev: &str) -> Option<Decision> {
         let letters: String = token.chars().filter(|c| c.is_alphabetic()).collect();
-        if letters != token || letters.chars().count() != 1 {
+        if letters.chars().count() != 1 {
             return None;
         }
-        // Only the letters that are real Russian one-letter words.
-        const WORDS: [&str; 8] = ["в", "и", "с", "к", "у", "о", "а", "я"];
+        // The token may also carry one ordinary punctuation character, as in
+        // "x." which was really "ч." (the number of hours).
+        let tail: String = token.chars().filter(|c| !c.is_alphabetic()).collect();
+        if letters != token && !is_plain_punctuation(&tail) {
+            return None;
+        }
+        // Only the letters that mirror into a real Russian one-letter word or a
+        // single-letter unit ("ч" = час, "г" = грамм).
         let mirror: String = letters.chars().map(|c| map_key(c).unwrap_or(c)).collect();
-        if script_of(&mirror) != Some(Script::Cyrillic) || !WORDS.contains(&mirror.as_str()) {
+        if script_of(&mirror) != Some(Script::Cyrillic)
+            || !(self.lexicon.is_ru(&mirror) || self.lexicon.is_ru_abbrev(&mirror))
+        {
             return None;
         }
         if script_of(&letters) != Some(Script::Latin) {
             return None;
         }
-        // The context has to be Russian: the previous token must contain a
-        // Cyrillic letter and be a word, not a single character or a number.
-        if !prev.chars().any(crate::layout::is_cyrillic) || prev.chars().count() < 2 {
+        // A previous token that is a single letter or a single digit means a
+        // list of variants ("a b c d", "1 2 3"). A word, a number ("P30"),
+        // punctuation or a bracket is a real context: "22 D рунете" is
+        // "22 В рунете", "P30 , и в Mate" is "P30, и в Mate". With nothing
+        // before the letter there is no context at all, so we leave it alone.
+        let prev_alnum: usize = prev.chars().filter(|c| c.is_alphanumeric()).count();
+        if prev_alnum == 1 || prev.is_empty() || self.lexicon.is_en(&letters) {
+            self.note(format!("skip {token}: no context around a lone letter"));
             return None;
         }
         if self.model.is_tech(&letters) || self.model.is_tech(&mirror) {
@@ -755,7 +942,7 @@ impl Engine {
         }
         Some(Decision {
             original: token.to_string(),
-            converted: mirror.clone(),
+            converted: format!("{mirror}{tail}"),
             target: TargetLayout::Russian,
             why: format!("{token} -> {mirror}  (one-letter word after {prev})"),
             flip: true,
@@ -784,14 +971,15 @@ impl Engine {
         })
     }
 
-    /// Two-letter Russian function words ("на", "не", "от") are below the length
-    /// the statistics can judge. Here an exact hit in the dictionary of the
-    /// other layout is enough, provided the letters really typed are not a
-    /// common word of the layout in use ("a", "I", "the").
+    /// One-to-three-letter service words are below the length the statistics can
+    /// judge, so they are decided by the dictionary: an exact hit in the lexicon
+    /// of the other layout is enough, provided the letters actually typed are a
+    /// real word of the layout in use ("a", "I", "vs", "kb"). Everything the
+    /// dictionary does not recognise still goes through the old statistical path.
     fn short_word_decision(&self, token: &str) -> Option<Decision> {
         let letters: String = token.chars().filter(|c| c.is_alphabetic()).collect();
         let len = letters.chars().count();
-        if letters != token || len != 2 {
+        if letters != token || len < 2 || len > 3 {
             return None;
         }
         let cur = script_of(&letters)?;
@@ -811,6 +999,53 @@ impl Engine {
         };
         if script_of(&mirror) != Some(other) || self.model.is_tech(&mirror) {
             return None;
+        }
+        // `ж` `ю` `б` sit on punctuation keys, so a mirror that still contains
+        // them is not a word of the other language at all: "муж" is not "ve;".
+        if !mirror.chars().all(|c| c.is_alphabetic()) {
+            self.note(format!("skip {token}: the mirror keeps a key that is punctuation"));
+            return None;
+        }
+        // "aaa", "III", "шшш": a run of one letter is a placeholder, not a word,
+        // unless the mirror is a real abbreviation such as "BB" = "ИИ".
+        let first = letters.chars().next().unwrap().to_lowercase().next().unwrap();
+        let repeated = letters
+            .chars()
+            .all(|c| c.to_lowercase().next().unwrap_or(c) == first);
+        let known_other =
+            other == Script::Cyrillic && (self.lexicon.is_ru(&mirror) || self.lexicon.is_ru_abbrev(&mirror));
+        if repeated && !known_other {
+            self.note(format!("skip {token}: a repeated letter is not a word"));
+            return None;
+        }
+        // Exact hit in the curated service-word dictionary.
+        if known_other {
+            if self.lexicon.is_en(&letters) {
+                self.note(format!(
+                    "skip {token}: {letters} is an English abbreviation and {mirror} a Russian word"
+                ));
+                return None;
+            }
+            return Some(Decision {
+                original: token.to_string(),
+                converted: mirror.clone(),
+                target: TargetLayout::Russian,
+                why: format!("{token} -> {mirror}  (service word in the dictionary)"),
+                flip: true,
+            });
+        }
+        if other == Script::Latin
+            && self.lexicon.is_en(&mirror)
+            && !self.lexicon.is_ru(&letters)
+            && !self.model.ru.has_word(&letters)
+        {
+            return Some(Decision {
+                original: token.to_string(),
+                converted: mirror.clone(),
+                target: TargetLayout::English,
+                why: format!("{token} -> {mirror}  (English abbreviation typed in Russian)"),
+                flip: true,
+            });
         }
         let typed_lp = match cur {
             Script::Cyrillic => self.model.ru.word_lp(&letters),
@@ -844,6 +1079,39 @@ impl Engine {
         self.decide_with(token, "")
     }
 
+    /// L-09: does this token belong to the user's "never touch" list? Only the
+    /// letters count (case and `ё`/`е` ignored), so `"git."` is still `git`.
+    /// The quote key `Э` is stripped from both ends: a user who whitelisted
+    /// "привет" does not want "ЭприветЭ" (the same word with shifted quotes)
+    /// rewritten either.
+    fn is_whitelisted(&self, token: &str) -> bool {
+        if self.cfg.whitelist.is_empty() {
+            return false;
+        }
+        let mut candidates = vec![token.to_string()];
+        if token.len() > 2 {
+            let chars: Vec<char> = token.chars().collect();
+            if chars[0] == 'Э' && chars[chars.len() - 1] == 'Э' {
+                candidates.push(chars[1..chars.len() - 1].iter().collect());
+            }
+        }
+        for candidate in &candidates {
+            let letters = crate::model::Lang::normalize(candidate);
+            if letters.is_empty() {
+                continue;
+            }
+            if self
+                .cfg
+                .whitelist
+                .iter()
+                .any(|w| crate::model::Lang::normalize(w) == letters)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     /// `prev` is the token that was typed immediately before this one: the
     /// single-letter rules need that context, the others do not.
     pub fn decide_with(&self, token: &str, prev: &str) -> Option<Decision> {
@@ -857,13 +1125,19 @@ impl Engine {
             return Some(d);
         }
 
+        // L-09: the whitelist is the strongest rule. It runs before every other
+        // decision, so a word the user explicitly protected cannot be rewritten
+        // by the technical-term, hyphen, quote, punctuation or lone-letter rules.
+        if self.is_whitelisted(token) {
+            self.note(format!("skip {token}: on the whitelist"));
+            return None;
+        }
+
         // A technical term typed correctly is never touched, and a mistyped
         // model number ("ввк4" = DDR4) is caught before the identifier rule,
         // which would otherwise throw away anything containing a digit.
         if self.model.is_tech(token) {
-            if traced() {
-                eprintln!("skip {token}: known technical term");
-            }
+            self.note(format!("skip {token}: known technical term"));
             return None;
         }
         if let Some(d) = self.tech_decision(token) {
@@ -912,9 +1186,7 @@ impl Engine {
         // not bail out on the raw letter count here.
         let has_ambiguous = token.chars().any(|c| !c.is_alphabetic() && is_ambiguous(c));
         if letters.chars().count() < self.cfg.min_len && !has_ambiguous {
-            if traced() {
-                eprintln!("skip {token}: too short for the model to judge");
-            }
+            self.note(format!("skip {token}: too short for the model to judge"));
             return None;
         }
         let cur = script_of(&letters)?;
@@ -946,24 +1218,12 @@ impl Engine {
                 || !all_caps
                 || (!other_lang.has_word(&mirror_letters) && !self.model.is_tech(&mirror_letters))
             {
-                if traced() {
-                    eprintln!("skip {token}: looks like an identifier");
-                }
+                self.note(format!("skip {token}: looks like an identifier"));
                 return None;
             }
         }
 
-        if self
-            .cfg
-            .whitelist
-            .iter()
-            .any(|w| w.eq_ignore_ascii_case(&letters))
-        {
-            if traced() {
-                eprintln!("skip {token}: on the whitelist");
-            }
-            return None;
-        }
+        // (The whitelist was already checked above, before all of these rules.)
         // A word that is a real word of the layout actually in use is untouched.
         // The dictionary is a raw frequency list, so it also contains corpus
         // scraps; keeping them is deliberate: dropping rare but genuine forms
@@ -973,9 +1233,7 @@ impl Engine {
             Script::Latin => &self.model.en,
         };
         if cur_lang.has_word(&letters) {
-            if traced() {
-                eprintln!("skip {token}: a real word of the layout in use");
-            }
+            self.note(format!("skip {token}: a real word of the layout in use"));
             return None;
         }
         let s_cur = cur_lang.score(&letters).unwrap_or(INVALID);
@@ -1010,9 +1268,7 @@ impl Engine {
             // known technical term; otherwise the Russian word stays as it is.
             if punct > 0 && !alt_lang.has_word(&cand_letters) && !self.model.is_tech(&cand_letters)
             {
-                if traced() {
-                    eprintln!("  candidate {cand}: keeps a letter that is punctuation");
-                }
+                self.note(format!("  candidate {cand}: keeps a letter that is punctuation"));
                 continue;
             }
             // A mirror form that is not in the dictionary still has to look like
@@ -1028,14 +1284,14 @@ impl Engine {
                 && !self.model.is_tech(&cand_letters)
                 && alt_lang.score(&cand_letters).unwrap_or(INVALID) < floor
             {
-                if traced() {
-                    let other = if cur == Script::Cyrillic {
-                        "English"
-                    } else {
-                        "Russian"
-                    };
-                    eprintln!("  candidate {cand} of {token}: not believable as a {other} word");
-                }
+                let other = if cur == Script::Cyrillic {
+                    "English"
+                } else {
+                    "Russian"
+                };
+                self.note(format!(
+                    "  candidate {cand} of {token}: not believable as a {other} word"
+                ));
                 continue;
             }
             // Keeping an ambiguous key is the less likely reading; inside the word
@@ -1053,9 +1309,7 @@ impl Engine {
         let (converted, s_alt, known) = match best {
             Some(b) => b,
             None => {
-                if traced() {
-                    eprintln!("skip {token}: no mirror candidate survived the checks");
-                }
+                self.note(format!("skip {token}: no mirror candidate survived the checks"));
                 return None;
             }
         };
@@ -1083,11 +1337,9 @@ impl Engine {
                 flip: true,
             })
         } else {
-            if traced() {
-                eprintln!(
-                    "skip {token}: mirror {converted} is only {diff:.2} better, need {margin:.2}"
-                );
-            }
+            self.note(format!(
+                "skip {token}: mirror {converted} is only {diff:.2} better, need {margin:.2}"
+            ));
             None
         }
     }
@@ -1355,6 +1607,96 @@ mod tests {
         }
         // A stem that is not a word is just noise, not punctuation.
         assert!(e.decide("сиж").is_none(), "сиж has no Russian reading");
+    }
+
+    /// L-08: a run of б/ю/ж is mapped key by key, not repeated from the last
+    /// key. "фактбю" is `,` then `.` — "факт,.", not "факт..".
+    #[test]
+    fn punctuation_runs_are_mapped_per_key() {
+        let e = engine();
+        for (typed, want) in [
+            ("фактбю", "факт,."),
+            ("проектБЮ", "проект.,"),
+            ("сказкажб", "сказка;,"),
+            ("фактжж", "факт;;"),
+            ("бю", ",."),
+            ("ююю", "..."),
+            ("ЮБ", ",."),
+        ] {
+            let d = e
+                .decide(typed)
+                .unwrap_or_else(|| panic!("{typed} should become punctuation"));
+            assert_eq!(d.converted, want, "{typed}");
+            assert!(!d.flip, "{typed}: punctuation must not switch the layout");
+        }
+    }
+
+    /// The rule only speaks about keys pressed while the layout was already
+    /// Russian, so the last letter may simply belong to the word. "Колю" is not
+    /// "Кол." — nothing was mistyped and the layout never changed.
+    #[test]
+    fn a_real_ending_is_never_read_as_a_key() {
+        let e = engine();
+        for word in [
+            "Колю",
+            "колю",
+            "стулю",
+            "плюлю",
+            "гаммую",
+            "продаю",
+            "понимаю",
+            "полагаю",
+            "мышью",
+            "люблю",
+            "неделю",
+        ] {
+            assert!(e.decide(word).is_none(), "{word} keeps its ending");
+        }
+        // A stem that is already a whole word closed the word: the key after it is
+        // punctuation, even if the two letters together look like a tail.
+        for (typed, want) in [
+            ("приветю", "привет."),
+            ("конечноб", "конечно,"),
+            ("миню", "мин."),
+            ("камераб", "камера,"),
+            ("работаетю", "работает."),
+        ] {
+            let d = e.decide(typed).expect("{typed} ends with a key");
+            assert_eq!(d.converted, want, "{typed}");
+            assert!(!d.flip, "{typed}: punctuation must not switch the layout");
+        }
+        // Inside the run only the letter that cannot belong to the word is a key:
+        // "клубю" is "клуб" + `.`, not "клу" + ",.".
+        let d = e.decide("клубю").expect("клубю ends with a dot key");
+        assert_eq!(d.converted, "клуб.");
+        assert!(!d.flip);
+        let d = e.decide("фактбю").expect("фактбю is two keys");
+        assert_eq!(d.converted, "факт,.");
+    }
+
+    /// L-09: the whitelist is consulted before the technical, quote and
+    /// lone-letter rules, so a protected word really stays untouched.
+    #[test]
+    fn whitelist_beats_every_other_rule() {
+        let mut cfg = Config::default();
+        cfg.whitelist.push("щдув".into()); // would be "oled" by the tech rule
+        cfg.whitelist.push("привет".into()); // "ЭприветЭ" by the quote rule
+        cfg.whitelist.push("b".into()); // the lone-letter conjunction rule
+        let e = Engine::new(Model::load().unwrap(), cfg);
+
+        assert!(
+            engine().decide("щдув").is_some(),
+            "control: without the whitelist щдув is rewritten"
+        );
+        assert!(
+            engine().decide("ЭприветЭ").is_some(),
+            "control: without the whitelist ЭприветЭ is rewritten"
+        );
+        for token in ["щдув", "ЩДУВ", "щдув&", "ЭприветЭ", "b", "привет,"] {
+            if let Some(d) = e.decide(token) {
+                panic!("{token} is whitelisted but became {}", d.converted);
+            }
+        }
     }
 
     /// A standalone Latin "b" is the Russian "и" (same key), but only when the

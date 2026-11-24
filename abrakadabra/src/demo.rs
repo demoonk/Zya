@@ -12,14 +12,15 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, GetKeyboardLayout, LoadKeyboardLayoutW, SendInput, SetFocus, INPUT, INPUT_0,
     INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, KLF_ACTIVATE, VIRTUAL_KEY,
     VK_3, VK_A, VK_C, VK_DELETE, VK_END, VK_ESCAPE, VK_HOME, VK_LCONTROL, VK_LMENU, VK_LSHIFT,
-    VK_Z,
+    VK_OEM_3, VK_Q, VK_Z, KEYBD_EVENT_FLAGS,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     FindWindowW, GetClassNameW, GetForegroundWindow, GetParent, GetWindow, GetWindowRect,
     GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, MoveWindow, PeekMessageW,
     RegisterClassW, SendMessageW, SetForegroundWindow, ShowWindow, TranslateMessage, GW_CHILD,
-    GW_HWNDNEXT, MSG, PM_REMOVE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_GETTEXT, WM_SETTEXT,
+    GW_HWNDNEXT, MSG, PM_REMOVE, SW_SHOW, SW_SHOWMINIMIZED, SW_RESTORE, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_GETTEXT, WM_SETTEXT,
     WNDCLASSW, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
@@ -719,9 +720,91 @@ unsafe fn is_focused(hwnd: HWND) -> bool {
     pid != std::process::id()
 }
 
+/// Windows refuses `SetForegroundWindow` for a process that has not interacted
+/// with the desktop yet. A real click on our own demo window is exactly the
+/// interaction the foreground lock is looking for.
+unsafe fn click_to_foreground(hwnd: HWND) {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_LMENU, KEYEVENTF_KEYUP, KEYBD_EVENT_FLAGS};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClassNameW, GetWindow, GW_HWNDPREV, SetWindowPos, HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOSIZE,
+    };
+    let mut rc = RECT::default();
+    if GetWindowRect(hwnd, &mut rc).is_err() {
+        return;
+    }
+    // The click must land on *our* window, so it has to be above everything
+    // else at those coordinates first.
+    let top = SetWindowPos(
+        hwnd,
+        Some(HWND_TOP),
+        0,
+        0,
+        0,
+        0,
+        SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+    );
+    if win::verbose() {
+        let prev = GetWindow(hwnd, GW_HWNDPREV).unwrap_or(HWND(std::ptr::null_mut()));
+        let mut pc = [0u16; 64];
+        let pn = if prev.0.is_null() {
+            0
+        } else {
+            GetClassNameW(prev, &mut pc).max(0) as usize
+        };
+        println!(
+            "diag: SetWindowPos top -> {top:?}, rect {:?}, window above {:?}",
+            rc,
+            (prev, String::from_utf16_lossy(&pc[..pn]))
+        );
+    }
+    // The classic foreground-lock workaround: a real Alt keystroke releases the
+    // "no process other than the foreground one may take the foreground" rule,
+    // after which SetForegroundWindow is honoured again.
+    let mk = |up: bool| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VK_LMENU,
+                wScan: 0,
+                dwFlags: if up {
+                    KEYEVENTF_KEYUP
+                } else {
+                    KEYBD_EVENT_FLAGS(0)
+                },
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let _ = SendInput(&[mk(false), mk(true)], std::mem::size_of::<INPUT>() as i32);
+    sleep(Duration::from_millis(40));
+    let x = (rc.left + rc.right) / 2;
+    let y = (rc.top + rc.bottom) / 2;
+    if win::verbose() {
+        println!(
+            "diag: click at ({x},{y}) to activate {hwnd:?}, visible {:?}",
+            IsWindowVisible(hwnd)
+        );
+    }
+    click_abs(x, y);
+    sleep(Duration::from_millis(120));
+    let _ = SetForegroundWindow(hwnd);
+    if win::verbose() {
+        let mut pos = windows::Win32::Foundation::POINT::default();
+        let cp = windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pos);
+        println!(
+            "diag: after click foreground = {:?}, cursor {:?} ({cp:?})",
+            GetForegroundWindow(),
+            pos
+        );
+    }
+}
+
 unsafe fn focus_edit(edit: HWND) -> bool {
     let root = root_of(edit);
-    for _ in 0..12 {
+    for i in 0..12 {
         pump_ms(120);
         force_foreground(root);
         pump_ms(60);
@@ -729,10 +812,25 @@ unsafe fn focus_edit(edit: HWND) -> bool {
         if is_focused(edit) {
             return true;
         }
+        if i >= 4 {
+            click_to_foreground(root);
+            pump_ms(120);
+            let _ = SetFocus(Some(edit));
+            if is_focused(edit) {
+                return true;
+            }
+        }
+        let fg = GetForegroundWindow();
+        let mut cls = [0u16; 64];
+        let n = GetClassNameW(fg, &mut cls).max(0) as usize;
+        let mut title = [0u16; 128];
+        let t = GetWindowTextW(fg, &mut title).max(0) as usize;
         println!(
-            "diag: focus {:?} / foreground {:?} (want {:?} in {root:?})",
+            "diag: focus {:?} / foreground {:?} class {:?} title {:?} (want {:?} in {root:?})",
             GetFocus(),
-            GetForegroundWindow(),
+            fg,
+            String::from_utf16_lossy(&cls[..n]),
+            String::from_utf16_lossy(&title[..t]),
             edit
         );
     }
@@ -745,8 +843,61 @@ unsafe fn force_foreground(hwnd: HWND) -> bool {
     }
     let my_tid = GetCurrentThreadId();
     let fg_tid = GetWindowThreadProcessId(GetForegroundWindow(), None);
-    let _ = AttachThreadInput(my_tid, fg_tid, true);
+    let target_tid = GetWindowThreadProcessId(hwnd, None);
+    let a1 = AttachThreadInput(my_tid, fg_tid, true);
+    let a2 = AttachThreadInput(my_tid, target_tid, true);
+    if win::verbose() {
+        println!("diag: AttachThreadInput fg={a1:?} target={a2:?} (fg tid {fg_tid}, my tid {my_tid})");
+    }
+    let _ = ShowWindow(hwnd, SW_SHOW);
     let _ = BringWindowToTop(hwnd);
+    let ok = SetForegroundWindow(hwnd);
+    let _ = AttachThreadInput(my_tid, target_tid, false);
+    let _ = AttachThreadInput(my_tid, fg_tid, false);
+    if win::verbose() {
+        println!(
+            "diag: SetForegroundWindow -> {ok:?} (last error {:?})",
+            std::io::Error::last_os_error().raw_os_error()
+        );
+    }
+    if GetForegroundWindow() == hwnd {
+        return true;
+    }
+    // A window restored from the minimized state is handed the foreground by the
+    // shell itself, which is the only route left when the foreground lock refuses
+    // a plain SetForegroundWindow.
+    let _ = ShowWindow(hwnd, SW_SHOWMINIMIZED);
+    sleep(Duration::from_millis(120));
+    let _ = ShowWindow(hwnd, SW_RESTORE);
+    sleep(Duration::from_millis(120));
+    let _ = SetForegroundWindow(hwnd);
+    if GetForegroundWindow() == hwnd {
+        return true;
+    }
+    // Windows keeps a "foreground lock": a process that has not produced input
+    // recently is not allowed to steal the foreground window. An injected,
+    // otherwise harmless modifier press releases that lock, which is what makes
+    // the test runnable from a shell instead of only from an interactive click.
+    use windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS;
+    let mk = |up: bool| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VK_LCONTROL,
+                wScan: 0,
+                dwFlags: if up {
+                    KEYEVENTF_KEYUP
+                } else {
+                    KEYBD_EVENT_FLAGS(0)
+                },
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let _ = SendInput(&[mk(false), mk(true)], std::mem::size_of::<INPUT>() as i32);
+    sleep(Duration::from_millis(40));
+    let _ = AttachThreadInput(my_tid, fg_tid, true);
     let _ = SetForegroundWindow(hwnd);
     let _ = AttachThreadInput(my_tid, fg_tid, false);
     GetForegroundWindow() == hwnd
@@ -921,7 +1072,9 @@ pub fn window_test() -> anyhow::Result<()> {
                     .collect::<Vec<u16>>()
                     .as_ptr(),
             ),
-            WINDOW_STYLE(WS_OVERLAPPEDWINDOW.0),
+            // ES_MULTILINE so Enter really inserts a line break: without it the
+            // L-02 test cannot see whether the correction landed on the new line.
+            WINDOW_STYLE(WS_OVERLAPPEDWINDOW.0 | 0x0004 | 0x0040),
             0,
             0,
             420,
@@ -1731,6 +1884,63 @@ pub fn window_test() -> anyhow::Result<()> {
             Err(e) => println!("test 19: tray icon unavailable: {e}"),
         }
 
+        // 24. L-02: a boundary key (Enter, Tab) right after a wrong-layout word
+        // must not send the backspaces onto the new line.
+        focus_edit(edit);
+        if ensure_layout(edit, 0x0409) {
+            win::set_auto(true);
+            set_text(edit, "");
+            type_into(edit, "ghbdtn", 60);
+            pump_ms(250);
+            press_vk(windows::Win32::UI::Input::KeyboardAndMouse::VK_RETURN);
+            pump_ms(700);
+            let with_enter = text_of(edit).replace("\r\n", "\n");
+            println!("test 24: \"ghbdtn\" + Enter -> {with_enter:?}");
+            assert!(
+                with_enter.starts_with("привет\n") && !with_enter.contains("ghbdtn"),
+                "the Enter swallowed the correction or moved it after the newline"
+            );
+
+            set_text(edit, "");
+            type_into(edit, "ghbdtn", 60);
+            pump_ms(250);
+            press_vk(windows::Win32::UI::Input::KeyboardAndMouse::VK_TAB);
+            pump_ms(700);
+            let with_tab = text_of(edit);
+            println!("test 24b: \"ghbdtn\" + Tab -> {with_tab:?}");
+            assert!(
+                with_tab.starts_with("привет") && !with_tab.contains("ghbdtn"),
+                "the Tab swallowed the correction"
+            );
+        } else {
+            println!("test 24: skipped, the English layout could not be selected");
+        }
+
+        // 25. Break is a toggle. Pressing it a second time by mistake must give
+        // back the text exactly as it was before the first press — not the token
+        // run through the mapping again.
+        win::set_auto(true);
+        set_text(edit, "");
+        focus_edit(edit);
+        if ensure_layout(edit, 0x0409) {
+            type_into(edit, "ghbdtn ", 60);
+            let fixed = wait_for_text(edit, "привет ", 3000);
+            press_hotkey_in(edit, win::configured_last());
+            pump_ms(800);
+            let mirrored = text_of(edit);
+            press_hotkey_in(edit, win::configured_last());
+            pump_ms(800);
+            let restored = text_of(edit);
+            println!("test 25: {fixed:?} -> Break {mirrored:?} -> Break {restored:?}");
+            assert_eq!(mirrored, "ghbdtn ", "the first Break did not mirror the word");
+            assert_eq!(
+                restored, "привет ",
+                "the second Break did not restore the text before it"
+            );
+        } else {
+            println!("test 25: skipped, the English layout could not be selected");
+        }
+
         win::remove_hook();
         let _ = DestroyWindow(edit);
         println!("window test ok");
@@ -2476,31 +2686,52 @@ unsafe fn click_abs(x: i32, y: i32) {
         INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
         MOUSEEVENTF_MOVE, MOUSEINPUT, MOUSE_EVENT_FLAGS,
     };
-    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
-    let nx = (x as f64 * 65535.0 / GetSystemMetrics(SM_CXSCREEN) as f64) as i32;
-    let ny = (y as f64 * 65535.0 / GetSystemMetrics(SM_CYSCREEN) as f64) as i32;
-    let mk = |flags: MOUSE_EVENT_FLAGS| INPUT {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetCursorPos, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN, SetCursorPos,
+    };
+    let mk = |flags: MOUSE_EVENT_FLAGS, dx: i32, dy: i32| INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
             mi: MOUSEINPUT {
-                dx: nx,
-                dy: ny,
+                dx,
+                dy,
                 mouseData: 0,
-                dwFlags: MOUSEEVENTF_ABSOLUTE | flags,
+                dwFlags: flags,
                 time: 0,
                 dwExtraInfo: 0,
             },
         },
     };
-    let _ = SendInput(&[mk(MOUSEEVENTF_MOVE)], std::mem::size_of::<INPUT>() as i32);
+    // SetCursorPos takes physical screen pixels, which is exactly what
+    // GetWindowRect reports. The normalised MOUSEEVENTF_ABSOLUTE coordinates of
+    // SendInput are relative to the primary monitor only, so on a scaled or
+    // multi-monitor desktop they put the pointer somewhere else; use them just
+    // as a fallback when SetCursorPos is refused.
+    if SetCursorPos(x, y).is_err() {
+        let nx = (x as f64 * 65535.0 / GetSystemMetrics(SM_CXSCREEN) as f64) as i32;
+        let ny = (y as f64 * 65535.0 / GetSystemMetrics(SM_CYSCREEN) as f64) as i32;
+        let _ = SendInput(
+            &[mk(MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE, nx, ny)],
+            std::mem::size_of::<INPUT>() as i32,
+        );
+    }
+    let mut here = POINT { x: 0, y: 0 };
+    let _ = GetCursorPos(&mut here);
+    if win::verbose() {
+        println!(
+            "diag: pointer at ({},{}), wanted ({x},{y})",
+            here.x, here.y
+        );
+    }
     pump_ms(120);
     let _ = SendInput(
-        &[mk(MOUSEEVENTF_LEFTDOWN)],
+        &[mk(MOUSEEVENTF_LEFTDOWN, 0, 0)],
         std::mem::size_of::<INPUT>() as i32,
     );
     pump_ms(80);
     let _ = SendInput(
-        &[mk(MOUSEEVENTF_LEFTUP)],
+        &[mk(MOUSEEVENTF_LEFTUP, 0, 0)],
         std::mem::size_of::<INPUT>() as i32,
     );
     pump_ms(300);
@@ -2725,6 +2956,85 @@ pub fn hook_watch(secs: u64) -> anyhow::Result<()> {
             }
         }
         println!("watch done: events {}", win::event_count());
+        win::remove_hook();
+    }
+    Ok(())
+}
+
+/// A key press without our tag: the hook treats it as a physical key, which is
+/// what a real user's Ctrl+` looks like.
+fn raw_key(vk: VIRTUAL_KEY, up: bool) -> u32 {
+    unsafe {
+        let input = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: 0,
+                    dwFlags: if up {
+                        KEYEVENTF_KEYUP
+                    } else {
+                        KEYBD_EVENT_FLAGS(0)
+                    },
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        SendInput(&[input], std::mem::size_of::<INPUT>() as i32)
+    }
+}
+
+/// `zя inject <n>` — send <n> plain 'q' key presses, nothing else. Used to
+/// check that a hook installed in another process sees the injected keys.
+pub fn inject_keys(count: u32) -> anyhow::Result<()> {
+    for _ in 0..count {
+        raw_key(VK_Q, false);
+        raw_key(VK_Q, true);
+        sleep(Duration::from_millis(150));
+    }
+    println!("inject: sent {count} q keys");
+    Ok(())
+}
+
+/// `zя addwordtest` — the Ctrl+` gesture against a window of this process: a
+/// phrase is put into an edit control, selected with the keyboard, copied, and
+/// Ctrl+` must put the first word of the selection into the dictionary.
+pub fn addword_test() -> anyhow::Result<()> {
+    unsafe {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_END, VK_HOME, VK_LSHIFT};
+        win::install_hook()?;
+        let edit = make_edit_window("EDIT", "ZyaAddWord", 200, 200)?;
+        focus_edit(edit);
+        set_text(edit, "эксперимент проверка слов");
+        pump_ms(400);
+        println!(
+            "addwordtest: focus {:?} foreground {:?} text {:?}",
+            GetFocus(),
+            window_title(GetForegroundWindow()),
+            text_of(edit)
+        );
+        press_vk(VK_HOME);
+        pump_ms(150);
+        press_combo2(VK_LSHIFT, VK_END);
+        pump_ms(200);
+        press_combo2(VK_LCONTROL, VK_C);
+        pump_ms(400);
+        println!("addwordtest: clipboard {:?}", win::clipboard_snapshot());
+        press_combo2(VK_LCONTROL, VK_OEM_3);
+        pump_ms(2500);
+        println!("addwordtest: hook events {}", win::event_count());
+        let fresh = crate::config::load();
+        println!("addwordtest: ru list {}", fresh.short_ru.len());
+        for word in &fresh.short_ru {
+            print!("{word} ");
+        }
+        println!();
+        println!("addwordtest: en list {}", fresh.short_en.len());
+        for word in &fresh.short_en {
+            print!("{word} ");
+        }
+        println!();
         win::remove_hook();
     }
     Ok(())

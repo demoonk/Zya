@@ -29,6 +29,12 @@ pub struct Sim {
     pub switches: usize,
     /// (исправленное, результат) по каждому переключению.
     pub log: Vec<(String, String)>,
+    /// Токен, закрытый последним, вместе с клавишей-границей: на него работает
+    /// жест Break.
+    closed: Option<(String, Option<char>)>,
+    /// Последнее ручное переключение: (до, после, граница, раскладка до). Второй
+    /// Break возвращает текст дословно, без нового зеркального прохода.
+    manual: Option<(String, String, Option<char>, bool)>,
 }
 
 fn is_code_char(c: char) -> bool {
@@ -65,6 +71,8 @@ impl Sim {
             out: String::new(),
             switches: 0,
             log: Vec::new(),
+            closed: None,
+            manual: None,
         }
     }
 
@@ -146,6 +154,7 @@ impl Sim {
         if !self.auto {
             self.out.push(c);
             self.prev = word.to_string();
+            self.closed = Some((word.to_string(), Some(c)));
             return;
         }
         let prev = self.prev.clone();
@@ -173,12 +182,47 @@ impl Sim {
                     self.russian = !self.russian;
                 }
                 self.prev = d.converted.clone();
+                self.closed = Some((d.converted.clone(), Some(c)));
             }
             None => {
                 self.out.push(c);
                 self.prev = word.to_string();
+                self.closed = Some((word.to_string(), Some(c)));
             }
         }
+    }
+
+    /// Нажатие Break: переключить раскладку последнего слова. Второе нажатие на
+    /// то же слово возвращает текст, который был до первого нажатия — дословно,
+    /// без ещё одного прохода через зеркальную таблицу.
+    pub fn press_break(&mut self, engine: &Engine) {
+        let Some(mv) = crate::layout::plan_manual_move(
+            &self.word,
+            self.closed.clone(),
+            &self.manual,
+            self.russian,
+            engine.cfg.smart_undo,
+            &|s| engine.believable_word(s),
+        ) else {
+            return;
+        };
+        if mv.boundary.is_some() {
+            self.out.pop();
+        }
+        for _ in 0..mv.from.chars().count() {
+            self.out.pop();
+        }
+        self.out.push_str(&mv.to);
+        if let Some(b) = mv.boundary {
+            self.out.push(b);
+        }
+        self.russian = mv.russian_after;
+        self.word.clear();
+        self.closed = Some((mv.to.clone(), mv.boundary));
+        self.prev = mv.to.clone();
+        self.manual = mv.undo.clone();
+        self.switches += 1;
+        self.log.push((mv.from.clone(), mv.to.clone()));
     }
 
     pub fn press_text(&mut self, engine: &Engine, keys: &str) {
@@ -201,10 +245,377 @@ impl Sim {
     }
 }
 
+/// Разбить текст на «слова + граница»: то, что пользователь видит как одно слово
+/// и что закрывается одним нажатием.
+fn tokens_of(text: &str) -> Vec<(String, char)> {
+    let mut out = Vec::new();
+    let mut word = String::new();
+    for c in text.chars() {
+        if c.is_alphanumeric() || c == '-' || c == '\'' || is_ambiguous(c) {
+            word.push(c);
+        } else if !word.is_empty() {
+            out.push((std::mem::take(&mut word), c));
+        } else {
+            out.push((String::new(), c));
+        }
+    }
+    if !word.is_empty() {
+        out.push((word, ' '));
+    }
+    out
+}
+
+/// Исход теста: набор без вмешательства пользователя.
+fn plain_sim(engine: &Engine, want: &str) -> Sim {
+    let mut sim = Sim::new(true);
+    sim.press_text(engine, &format!("{} ", keys_of(want)));
+    sim
+}
+
+fn kinds_line(kinds: &std::collections::HashMap<&'static str, usize>) -> String {
+    let mut list: Vec<(&'static str, usize)> = kinds.iter().map(|(k, v)| (*k, *v)).collect();
+    list.sort_by_key(|x| std::cmp::Reverse(x.1));
+    list.iter()
+        .map(|(k, v)| format!("{k}: {v}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Тест «как печатает человек»: после каждого слова смотрим, что получилось.
+/// Если слово неверное — жмём Break. Если после Break всё ещё неверно — жмём
+/// Break ещё раз (переключатель должен вернуть исходный текст).
+struct UserRun {
+    sim: Sim,
+    break_presses: usize,
+    noticed: usize,
+    fixed_by_one: usize,
+    fixed_by_two: usize,
+    returned_to_start: usize,
+    still_wrong: usize,
+    closer_but_wrong: usize,
+    farther: usize,
+    cases: Vec<(String, String, String, String, &'static str)>,
+}
+
+fn user_sim(engine: &Engine, want: &str) -> UserRun {
+    let sim = Sim::new(true);
+    let mut run = UserRun {
+        sim,
+        break_presses: 0,
+        noticed: 0,
+        fixed_by_one: 0,
+        fixed_by_two: 0,
+        returned_to_start: 0,
+        still_wrong: 0,
+        closer_but_wrong: 0,
+        farther: 0,
+        cases: Vec::new(),
+    };
+    for (word, boundary) in tokens_of(want) {
+        if word.is_empty() {
+            run.sim.press(engine, boundary);
+            continue;
+        }
+        let start = run.sim.out.chars().count();
+        run.sim.press_text(engine, &keys_of(&word));
+        run.sim.press(engine, boundary);
+        let expect = format!("{word}{boundary}");
+        let typed: String = run.sim.out.chars().skip(start).collect();
+        if typed == expect {
+            continue;
+        }
+        run.noticed += 1;
+        run.break_presses += 1;
+        run.sim.press_break(engine);
+        let after1: String = run.sim.out.chars().skip(start).collect();
+        if after1 == expect {
+            run.fixed_by_one += 1;
+            run.cases.push((expect.clone(), typed, after1, String::new(), "помог один Break"));
+            continue;
+        }
+        run.break_presses += 1;
+        run.sim.press_break(engine);
+        let after2: String = run.sim.out.chars().skip(start).collect();
+        let before = distance(&typed, &expect);
+        let now = distance(&after1, &expect);
+        if now < before {
+            run.closer_but_wrong += 1;
+        } else if now > before {
+            run.farther += 1;
+        }
+        if after2 == expect {
+            run.fixed_by_two += 1;
+            run.cases.push((expect, typed, after1, after2, "помог второй Break"));
+        } else if after2 == typed {
+            run.returned_to_start += 1;
+            run.cases.push((expect, typed, after1, after2, "второй Break вернул исходное"));
+        } else {
+            run.still_wrong += 1;
+            run.cases.push((expect, typed, after1, after2, "оба Break не помогли"));
+        }
+    }
+    run
+}
+
+/// Levenshtein distance: how far the visible text is from what the user meant.
+fn distance(a: &str, b: &str) -> usize {
+    let x: Vec<char> = a.chars().collect();
+    let y: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=y.len()).collect();
+    let mut cur = vec![0usize; y.len() + 1];
+    for i in 1..=x.len() {
+        cur[0] = i;
+        for j in 1..=y.len() {
+            cur[j] = (prev[j] + 1)
+                .min(cur[j - 1] + 1)
+                .min(prev[j - 1] + (x[i - 1] != y[j - 1]) as usize);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[y.len()]
+}
+
+/// Счётчик совпадений с эталоном: (точные символы, ошибочные фрагменты, символы
+/// в этих фрагментах).
+fn score_against(want: &str, got: &str) -> (usize, usize, usize) {
+    let w: Vec<char> = want.chars().collect();
+    let g: Vec<char> = got.trim_end().chars().collect();
+    let (mut exact, mut spans, mut chars) = (0usize, 0usize, 0usize);
+    let mut i = 0usize;
+    while i < w.len() {
+        if g.get(i).copied() == Some(w[i]) {
+            exact += 1;
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while j < w.len() && g.get(j).copied() != Some(w[j]) {
+            j += 1;
+        }
+        spans += 1;
+        chars += j - i;
+        i = j;
+    }
+    (exact, spans, chars)
+}
+
+pub fn user_test() -> anyhow::Result<()> {
+    let engine = Engine::new(crate::model::Model::load()?, crate::config::load());
+    let dir = ["data/articles", "../data/articles"]
+        .iter()
+        .map(std::path::Path::new)
+        .find(|d| d.is_dir())
+        .ok_or_else(|| anyhow::anyhow!("статей нет: запусти tools/fetch_articles.py"))?;
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "txt") {
+                files.push(p);
+            }
+        }
+    }
+    files.sort();
+    if files.is_empty() {
+        return Err(anyhow::anyhow!("no article files"));
+    }
+
+    let mut windows = 0usize;
+    let mut chars = 0usize;
+    let (mut p_exact, mut p_spans, mut p_chars) = (0usize, 0usize, 0usize);
+    let (mut u_exact, mut u_spans, mut u_chars) = (0usize, 0usize, 0usize);
+    let mut presses = 0usize;
+    let mut noticed = 0usize;
+    let mut fixed1 = 0usize;
+    let mut fixed2 = 0usize;
+    let mut returned = 0usize;
+    let mut still = 0usize;
+    let mut closer = 0usize;
+    let mut farther = 0usize;
+    let mut all_cases: Vec<(String, String, String, String, &'static str)> = Vec::new();
+    let mut plain_spans: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut user_spans: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut user_kinds: std::collections::HashMap<&'static str, usize> = std::collections::HashMap::new();
+    let mut per_file: std::collections::BTreeMap<String, (usize, usize, usize, usize, usize)> = std::collections::BTreeMap::new();
+    let mut plain_kinds: std::collections::HashMap<&'static str, usize> = std::collections::HashMap::new();
+
+    for f in &files {
+        let body = clean_article(&std::fs::read_to_string(f)?);
+        for w in article_windows(&body, 700) {
+            if !window_is_testable(&w) {
+                continue;
+            }
+            windows += 1;
+            chars += w.chars().count();
+            let file_name = f
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "?".to_string());
+
+            let plain = plain_sim(&engine, &w);
+            let (pe, ps, pc) = score_against(&w, &plain.out);
+            p_exact += pe;
+            p_spans += ps;
+            p_chars += pc;
+            let want: Vec<char> = w.chars().collect();
+            let got: Vec<char> = plain.out.trim_end().chars().collect();
+            let mut i = 0usize;
+            while i < want.len() {
+                if got.get(i).copied() == Some(want[i]) {
+                    i += 1;
+                    continue;
+                }
+                let mut j = i;
+                while j < want.len() && got.get(j).copied() != Some(want[j]) {
+                    j += 1;
+                }
+                let a: String = want[i..j].iter().collect();
+                let b: String = if i < got.len() {
+                    got[i..j.min(got.len())].iter().collect()
+                } else {
+                    String::new()
+                };
+                *plain_spans.entry(format!("{a} -> {b}")).or_insert(0) += 1;
+                *plain_kinds.entry(mistake_kind(&a, &b)).or_insert(0) += 1;
+                i = j;
+            }
+
+            let run = user_sim(&engine, &w);
+            let (ue, us, uc) = score_against(&w, &run.sim.out);
+            let entry = per_file
+                .entry(file_name.clone())
+                .or_insert((0usize, 0usize, 0usize, 0usize, 0usize));
+            entry.0 += w.chars().count();
+            entry.1 += pc;
+            entry.2 += uc;
+            entry.3 += run.noticed;
+            entry.4 += run.break_presses;
+            u_exact += ue;
+            u_spans += us;
+            u_chars += uc;
+            presses += run.break_presses;
+            noticed += run.noticed;
+            fixed1 += run.fixed_by_one;
+            fixed2 += run.fixed_by_two;
+            returned += run.returned_to_start;
+            still += run.still_wrong;
+            closer += run.closer_but_wrong;
+            farther += run.farther;
+            for c in run.cases {
+                all_cases.push(c);
+            }
+            let want: Vec<char> = w.chars().collect();
+            let got: Vec<char> = run.sim.out.trim_end().chars().collect();
+            let mut i = 0usize;
+            while i < want.len() {
+                if got.get(i).copied() == Some(want[i]) {
+                    i += 1;
+                    continue;
+                }
+                let mut j = i;
+                while j < want.len() && got.get(j).copied() != Some(want[j]) {
+                    j += 1;
+                }
+                let a: String = want[i..j].iter().collect();
+                let b: String = if i < got.len() {
+                    got[i..j.min(got.len())].iter().collect()
+                } else {
+                    String::new()
+                };
+                *user_spans.entry(format!("{a} -> {b}")).or_insert(0) += 1;
+                *user_kinds.entry(mistake_kind(&a, &b)).or_insert(0) += 1;
+                i = j;
+            }
+        }
+    }
+
+    println!(
+        "тест: {} файлов, {} окон, {} символов",
+        files.len(),
+        windows,
+        chars
+    );
+    println!(
+        "1) только автоисправление: точно {}/{} = {:.1} %, ошибочных фрагментов: {} ({} символов), уникальных: {}",
+        p_exact,
+        chars,
+        100.0 * p_exact as f64 / chars.max(1) as f64,
+        p_spans,
+        p_chars,
+        plain_spans.len()
+    );
+    println!(
+        "2) пользователь жмёт Break: точно {}/{} = {:.1} %, ошибочных фрагментов: {} ({} символов), уникальных: {}",
+        u_exact,
+        chars,
+        100.0 * u_exact as f64 / chars.max(1) as f64,
+        u_spans,
+        u_chars,
+        user_spans.len()
+    );
+    println!(
+        "пользователь заметил ошибок: {noticed}, нажатий Break: {presses}; помог один: {fixed1}, помог второй: {fixed2}, второй вернул исходное: {returned}, не помогли: {still}"
+    );
+    println!(
+        "после первого Break: стало ближе к правильному (но всё ещё неверно): {closer}, стало дальше: {farther}"
+    );
+    let dump: Vec<String> = all_cases
+        .iter()
+        .map(|(w, a, b, c, k)| format!("{k}\t{w}\t{a}\t{b}\t{c}"))
+        .collect();
+    std::fs::write("usertest_cases.txt", dump.join("\n"))?;
+    println!("подробный разбор {noticed} случаев записан в usertest_cases.txt");
+
+    println!("по типам ошибок без Break: {}", kinds_line(&plain_kinds));
+    println!("по типам ошибок после Break: {}", kinds_line(&user_kinds));
+    println!("\nпо статьям:");
+    for (name, &(n, pc, uc, no, pr)) in &per_file {
+        let saved = pc.saturating_sub(uc);
+        println!(
+            "  {name}: {n} симв., без Break {pc} ошиб. симв., после Break {uc} (исправлено {saved}), замечено {no}, Break нажат {pr} раз"
+        );
+    }
+
+    let mut plain_list: Vec<(String, usize)> = plain_spans.into_iter().collect();
+    plain_list.sort_by_key(|x| std::cmp::Reverse(x.1));
+    println!("\nуникальные ошибки без Break (первые 40):");
+    for (s, n) in plain_list.iter().take(40) {
+        println!("  x{n} {s}");
+    }
+    let mut user_list: Vec<(String, usize)> = user_spans.into_iter().collect();
+    user_list.sort_by_key(|x| std::cmp::Reverse(x.1));
+    println!("\nуникальные ошибки после Break (первые 40):");
+    for (s, n) in user_list.iter().take(40) {
+        println!("  x{n} {s}");
+    }
+
+    println!("\nчто именно сделал Break:");
+    for kind in [
+        "помог один Break",
+        "второй Break вернул исходное",
+        "помог второй Break",
+        "оба Break не помогли",
+    ] {
+        let group: Vec<(String, String, String, String)> = all_cases
+            .iter()
+            .filter(|c| c.4 == kind)
+            .map(|c| (c.0.clone(), c.1.clone(), c.2.clone(), c.3.clone()))
+            .collect();
+        println!("  {kind}: {}", group.len());
+        for (want, a, b, c) in group.iter().take(15) {
+            if c.is_empty() {
+                println!("    надо «{want}» было «{a}» -> Break -> «{b}»");
+            } else {
+                println!("    надо «{want}» было «{a}» -> Break -> «{b}» -> Break -> «{c}»");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Физические клавиши, которыми набирается `text`: кириллическая буква — это
 /// клавиша с английским знаком в том же месте, латиница — сама клавиша.
-pub fn keys_of(text: &str) -> String {
-    text.chars()
+pub fn keys_of(text: &str) -> String {    text.chars()
         .map(|c| {
             if is_cyrillic(c) {
                 map_key(c).unwrap_or(c)
@@ -293,6 +704,62 @@ pub fn sim_test() -> anyhow::Result<()> {
             println!("OK  : {keys:?} защищён");
         } else {
             println!("FAIL: {keys:?} -> {got:?}");
+        }
+    }
+
+    // Break — переключатель. Первое нажатие зеркалит последнее слово, второе на
+    // том же слове возвращает текст, который был до первого нажатия.
+    {
+        total += 1;
+        let mut sim = Sim::new(true);
+        sim.press_text(&engine, &keys_of("привет "));
+        let fixed = sim.out.clone();
+        sim.press_break(&engine);
+        let mirrored = sim.out.clone();
+        sim.press_break(&engine);
+        let restored = sim.out.clone();
+        if fixed == "привет " && mirrored == "ghbdtn " && restored == "привет " {
+            ok += 1;
+            println!("OK  : Break дважды: {fixed:?} -> {mirrored:?} -> {restored:?}");
+        } else {
+            println!("FAIL: Break дважды: {fixed:?} -> {mirrored:?} -> {restored:?}");
+        }
+    }
+
+    // Слово, уже исправленное автоматикой ("фактбю" -> "факт,."), при втором
+    // Break должно вернуться дословно, а не конвертироваться ещё раз.
+    {
+        total += 1;
+        let mut sim = Sim::new(false);
+        sim.press_text(&engine, "afrn,. ");
+        let fixed = sim.out.clone();
+        sim.press_break(&engine);
+        let mirrored = sim.out.clone();
+        sim.press_break(&engine);
+        let restored = sim.out.clone();
+        if fixed == "факт,. " && mirrored == "afrnбю " && restored == "факт,. " {
+            ok += 1;
+            println!("OK  : Break дважды над исправленным: {fixed:?} -> {mirrored:?} -> {restored:?}");
+        } else {
+            println!(
+                "FAIL: Break дважды над исправленным: {fixed:?} -> {mirrored:?} -> {restored:?}"
+            );
+        }
+    }
+
+    // Break после нового слова работает как обычный переключатель.
+    {
+        total += 1;
+        let mut sim = Sim::new(true);
+        sim.press_text(&engine, &keys_of("привет мир "));
+        sim.press_break(&engine);
+        let after = sim.out.clone();
+        sim.press_break(&engine);
+        if after == "привет vbh " && sim.out == "привет мир " {
+            ok += 1;
+            println!("OK  : Break по новому слову: {after:?} -> {:?}", sim.out);
+        } else {
+            println!("FAIL: Break по новому слову: {after:?} -> {:?}", sim.out);
         }
     }
 
@@ -674,7 +1141,7 @@ pub fn sim_all_articles() -> anyhow::Result<()> {
                 *broken_spans
                     .entry(format!("{broken} -> {typed}"))
                     .or_insert(0) += 1;
-                if diffs.len() < 30 {
+                if diffs.len() < 120 {
                     let l = i.saturating_sub(16);
                     let left: String = want[l..i].iter().collect();
                     let right: String = want[j..(j + 16).min(want.len())].iter().collect();
@@ -734,6 +1201,303 @@ pub fn sim_all_articles() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// What kind of mistake a broken fragment is: eaten punctuation, a letter that
+/// the rules turned into punctuation, a missed or an extra layout flip.
+fn mistake_kind(want: &str, got: &str) -> &'static str {
+    let w: Vec<char> = want.chars().collect();
+    let g: Vec<char> = got.chars().collect();
+    if w.len() == 1 && g.len() == 1 {
+        let (a, b) = (w[0], g[0]);
+        if matches!(a, '.' | ',' | ';' | ':') && matches!(b, 'б' | 'ю' | 'ж' | 'Б' | 'Ю' | 'Ж') {
+            return "пунктуация съедена буквой";
+        }
+        if matches!(b, '.' | ',' | ';' | ':') && matches!(a, 'б' | 'ю' | 'ж' | 'Б' | 'Ю' | 'Ж') {
+            return "буква слова заменена знаком";
+        }
+        if is_cyrillic(a) && is_latin(b) {
+            return "слово осталось латинским (не зеркалось)";
+        }
+        if is_latin(a) && is_cyrillic(b) {
+            return "лишнее зеркальное исправление";
+        }
+    }
+    if w.iter().all(|&c| is_cyrillic(c)) && g.iter().all(|&c| is_latin(c)) {
+        return "пропущенное переключение раскладки";
+    }
+    if w.iter().all(|&c| is_latin(c)) && g.iter().all(|&c| is_cyrillic(c)) {
+        return "излишнее переключение раскладки";
+    }
+    "другое"
+}
+
+/// Report on the saved technical corpus: every article is typed with the layout
+/// in the wrong state, every mistake is grouped, each distinct one is explained
+/// by the rule that let it through, and repeats are folded into a count.
+pub fn error_report() -> anyhow::Result<()> {
+    let engine = Engine::new(crate::model::Model::load()?, crate::config::load());
+    let dir = ["data/articles", "../data/articles"]
+        .iter()
+        .map(std::path::Path::new)
+        .find(|d| d.is_dir())
+        .ok_or_else(|| anyhow::anyhow!("статей нет: запусти tools/fetch_articles.py"))?;
+
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "txt") {
+                files.push(p);
+            }
+        }
+    }
+    files.sort();
+    if files.is_empty() {
+        return Err(anyhow::anyhow!("no article files in {dir:?}"));
+    }
+
+    struct Mistake {
+        want: String,
+        got: String,
+        count: usize,
+        kind: &'static str,
+        place: String,
+        places: Vec<String>,
+        verdict: String,
+        causes: std::collections::HashMap<&'static str, usize>,
+        tokens: Vec<String>,
+    }
+
+    let mut seen: std::collections::HashMap<String, Mistake> = std::collections::HashMap::new();
+    let mut kinds: std::collections::HashMap<&'static str, usize> = std::collections::HashMap::new();
+    let mut causes: std::collections::HashMap<&'static str, usize> = std::collections::HashMap::new();
+    let (mut chars, mut exact, mut fixes, mut wins, mut spans) =
+        (0usize, 0usize, 0usize, 0usize, 0usize);
+    let mut lost_chars = 0usize;
+
+    for f in &files {
+        let name = f
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let body = clean_article(&std::fs::read_to_string(f)?);
+        for w in article_windows(&body, 700) {
+            if !window_is_testable(&w) {
+                continue;
+            }
+            wins += 1;
+            let want: Vec<char> = w.chars().collect();
+            let mut sim = Sim::new(true);
+            sim.press_text(&engine, &format!("{} ", keys_of(&w)));
+            let got: Vec<char> = sim.out.trim_end().chars().collect();
+            engine.take_notes();
+            chars += want.len();
+            fixes += sim.switches;
+
+            let mut i = 0usize;
+            while i < want.len() {
+                if got.get(i).copied() == Some(want[i]) {
+                    exact += 1;
+                    i += 1;
+                    continue;
+                }
+                let mut j = i;
+                while j < want.len() && got.get(j).copied() != Some(want[j]) {
+                    j += 1;
+                }
+                spans += 1;
+                lost_chars += j - i;
+                let broken: String = want[i..j].iter().collect();
+                let typed: String = if i < got.len() {
+                    got[i..j.min(got.len())].iter().collect()
+                } else {
+                    String::new()
+                };
+
+                // The word the engine really saw: the run of output characters
+                // that ends where the text first went wrong.
+                let mut s = i;
+                while s > 0 && got[s - 1] != ' ' {
+                    s -= 1;
+                }
+                let mut e = i;
+                while e < got.len() && got[e] != ' ' {
+                    e += 1;
+                }
+                let token: String = got[s..e].iter().collect();
+                let decision = engine.decide_with(&token, "");
+                let notes = engine.take_notes();
+                let verdict = match &decision {
+                    Some(d) => format!("исправлено: «{token}» -> «{}»", d.converted),
+                    None if !notes.is_empty() => notes.join(" + "),
+                    None => format!("«{token}» не распознан ни одним правилом"),
+                };
+
+                let kind = mistake_kind(&broken, &typed);
+                let cause = cause_of(&verdict);
+                *kinds.entry(kind).or_insert(0) += 1;
+                *causes.entry(cause).or_insert(0) += 1;
+                let entry = seen
+                    .entry(format!("{broken} -> {typed}"))
+                    .or_insert_with(|| Mistake {
+                        want: broken.clone(),
+                        got: typed.clone(),
+                        count: 0,
+                        kind,
+                        place: String::new(),
+                        places: Vec::new(),
+                        verdict,
+                        causes: std::collections::HashMap::new(),
+                        tokens: Vec::new(),
+                    });
+                *entry.causes.entry(cause).or_insert(0) += 1;
+                if entry.tokens.len() < 8 && !entry.tokens.iter().any(|t| t == &token) {
+                    entry.tokens.push(token.clone());
+                }
+                entry.count += 1;
+                let l = i.saturating_sub(14);
+                let left: String = want[l..i].iter().collect();
+                let right: String = want[j..(j + 14).min(want.len())].iter().collect();
+                let place = format!("{name}:{i} «{left}[{broken}]{right}»");
+                if entry.place.is_empty() {
+                    entry.place = place.clone();
+                } else if entry.place != place && entry.places.len() < 3 {
+                    entry.places.push(place);
+                }
+                i = j;
+            }
+        }
+    }
+
+    let acc = 100.0 * exact as f64 / chars.max(1) as f64;
+    println!(
+        "тест набора технического текста: {} файлов, {} окон, {} символов",
+        files.len(),
+        wins,
+        chars
+    );
+    println!(
+        "исправлений: {fixes}, точно: {exact}/{chars} = {acc:.1} %, ошибок: {spans} фрагментов ({lost_chars} символов), уникальных: {}",
+        seen.len()
+    );
+
+    let mut kind_list: Vec<(&'static str, usize)> = kinds.into_iter().collect();
+    kind_list.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    println!("по типам:");
+    for (k, n) in &kind_list {
+        println!("  {k}: {n}");
+    }
+
+    let mut cause_list: Vec<(&'static str, usize)> = causes.into_iter().collect();
+    cause_list.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    println!("по причинам:");
+    for (c, n) in &cause_list {
+        println!("  {c}: {n}");
+    }
+
+    let mut list: Vec<&Mistake> = seen.values().collect();
+    list.sort_by_key(|m| (std::cmp::Reverse(m.count), m.kind, m.want.clone()));
+    println!("уникальные ошибки (повторяющиеся объединены в счётчик):");
+    for (n, m) in list.iter().enumerate() {
+        println!(
+            "  {}. x{} {want} -> {got}   [{kind}]",
+            n + 1,
+            m.count,
+            want = m.want,
+            got = m.got,
+            kind = m.kind
+        );
+        println!("     где: {}", m.place);
+        for p in &m.places {
+            println!("       также: {p}");
+        }
+        let mut cs: Vec<(&'static str, usize)> = m
+            .causes
+            .iter()
+            .map(|(c, n)| (*c, *n))
+            .collect();
+        cs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        let why: Vec<String> = cs
+            .iter()
+            .map(|(c, n)| format!("{c} ×{n}"))
+            .collect();
+        println!("     причина: {}", why.join("; "));
+        println!("     токены: {}", m.tokens.join(", "));
+        println!("     пример разбора движком: {}", m.verdict);
+    }
+    if acc < 98.0 {
+        return Err(anyhow::anyhow!("article typing accuracy below 98%"));
+    }
+    println!("прогон ok");
+    Ok(())
+}
+
+/// The rule that let a mistake through, in words a human can act on.
+fn cause_of(verdict: &str) -> &'static str {
+    if verdict.starts_with("исправлено") {
+        return "исправлено, но не до конца (каскад из-за предыдущей правки)";
+    }
+    if verdict.contains("не распознан") {
+        return "токен не распознан ни одним правилом";
+    }
+    for (needle, cause) in [
+        ("too short", "токен короче min_len (3) — движок его не судит"),
+        ("looks like an identifier", "защита идентификаторов (protect_code)"),
+        (
+            "a real word of the layout in use",
+            "форма есть в словаре той раскладки, что уже включена",
+        ),
+        (
+            "the ending closes like a real Russian word",
+            "окончание выглядит как окончание русского слова",
+        ),
+        (
+            "is already a complete word",
+            "основа до ключа — целое слово словаря",
+        ),
+        (
+            "no mirror candidate survived",
+            "ни один зеркальный кандидат не прошёл проверку",
+        ),
+        (
+            "not believable as",
+            "зеркальная форма неправдоподобна как слово языка",
+        ),
+        (
+            "keeps a letter that is punctuation",
+            "кандидат сохраняет букву там, где клавиша даёт пунктуацию",
+        ),
+        (
+            "reads better as",
+            "основа читается как слово другой раскладки",
+        ),
+        ("is only", "переход не уверенный: не хватает margin"),
+        (
+            "no context around a lone letter",
+            "вокруг одной буквы нет слова — контекст неясен",
+        ),
+        (
+            "is an English abbreviation and",
+            "конфликт словарей: одни клавиши — слово обеих раскладок",
+        ),
+        (
+            "a repeated letter is not a word",
+            "повтор одной буквы, а не слово",
+        ),
+        (
+            "the mirror keeps a key that is punctuation",
+            "зеркальное чтение содержит клавишу пунктуации",
+        ),
+        ("known technical term", "термин из технического словаря"),
+        ("on the whitelist", "слово в списке защиты пользователя"),
+    ] {
+        if verdict.contains(needle) {
+            return cause;
+        }
+    }
+    "причина не определена"
+}
+
 fn lcs_len(a: &[char], b: &[char]) -> usize {
     let mut prev = vec![0usize; b.len() + 1];
     let mut cur = vec![0usize; b.len() + 1];
@@ -759,6 +1523,93 @@ mod tests {
             crate::model::Model::load().expect("language model"),
             crate::engine::Config::default(),
         )
+    }
+
+    #[test]
+    fn the_classic_break_mirrors_back_when_smart_undo_is_off() {
+        let mut cfg = crate::engine::Config::default();
+        cfg.smart_undo = false;
+        let engine = Engine::new(crate::model::Model::load().expect("language model"), cfg);
+        let mut sim = Sim::new(true);
+        sim.press_text(&engine, "привет ");
+        let fixed = sim.out.clone();
+        sim.press_break(&engine);
+        let mirrored = sim.out.clone();
+        sim.press_break(&engine);
+        let back = sim.out.clone();
+        assert_eq!(fixed, "привет ");
+        assert_eq!(mirrored, "ghbdtn ");
+        // Without the smart mode the second press mirrors the token again, which
+        // is the classic behaviour and still returns the original text.
+        assert_eq!(back, "привет ");
+    }
+
+    #[test]
+    fn mistake_categories_are_named() {
+        assert_eq!(mistake_kind(".", "ю"), "пунктуация съедена буквой");
+        assert_eq!(mistake_kind("ю", "."), "буква слова заменена знаком");
+        assert_eq!(
+            mistake_kind("факт", "rfvjt"),
+            "пропущенное переключение раскладки"
+        );
+        assert_eq!(
+            mistake_kind("OLED", "щдув"),
+            "излишнее переключение раскладки"
+        );
+        assert_eq!(mistake_kind("12", "13"), "другое");
+    }
+
+    #[test]
+    fn the_error_report_runs_when_articles_are_saved() {
+        if !std::path::Path::new("data/articles").is_dir()
+            && !std::path::Path::new("../data/articles").is_dir()
+        {
+            return;
+        }
+        error_report().expect("the mistake report must run on the saved corpus");
+    }
+
+    #[test]
+    fn the_user_test_runs_when_articles_are_saved() {
+        if !std::path::Path::new("data/articles").is_dir()
+            && !std::path::Path::new("../data/articles").is_dir()
+        {
+            return;
+        }
+        user_test().expect("the user test must run on the saved corpus");
+    }
+
+    #[test]
+    fn a_word_is_split_from_its_boundary() {
+        let units = tokens_of("привет мир,");
+        assert_eq!(units[0], ("привет".to_string(), ' '));
+        assert_eq!(units[1], ("мир,".to_string(), ' '));
+    }
+
+    #[test]
+    fn the_user_test_notices_what_the_engine_missed_and_break_fixes_it() {
+        let e = engine();
+        let run = user_sim(&e, "мы ");
+        assert_eq!(run.noticed, 1, "`мы` stayed Latin because `vs` is an English word");
+        assert_eq!(run.fixed_by_one, 1, "one Break is enough");
+        assert_eq!(run.returned_to_start, 0);
+        assert_eq!(run.sim.out, "мы ");
+    }
+
+    #[test]
+    fn a_second_break_never_creates_a_third_state() {
+        let e = engine();
+        let run = user_sim(&e, "коронавируса. Да, лицо. тройную");
+        assert!(!run.cases.is_empty(), "the sample must contain mistakes");
+        for (want, before, after1, after2, _kind) in &run.cases {
+            // One press fixed it (after2 is empty); otherwise the second press
+            // must either repair the token or give back exactly what was there.
+            let outcome = if after2.is_empty() { after1 } else { after2 };
+            assert!(
+                outcome == want || outcome == before,
+                "{want}: the second press must restore or fix, not invent: {before} / {outcome}"
+            );
+        }
     }
 
     #[test]
@@ -970,5 +1821,21 @@ mod tests {
         let (got, sw) = type_keys(&e, "pfghto`yysq ", true);
         assert_eq!(got, "запрещённый ", "got {got}");
         assert_eq!(sw, 1);
+    }
+
+    /// While the layout is Russian the `.` key really writes `ю`. It becomes a
+    /// dot only when the ending cannot belong to the word: "kjdl." is "Колю"
+    /// and stays "Колю", "kjrd." is "клуб" + the dot key and becomes "клуб.".
+    #[test]
+    fn the_dot_key_is_a_letter_inside_a_russian_word() {
+        let e = engine();
+        let (got, sw) = run_case(&e, "Колю ", false);
+        assert_eq!(got, "Колю ", "got {got}");
+        assert_eq!(sw, 0, "the layout did not change, so nothing is fixed");
+        let (got, sw) = run_case(&e, "клуб. ", false);
+        assert_eq!(got, "клуб. ", "got {got}");
+        assert_eq!(sw, 1);
+        let (got, _) = run_case(&e, "факт. ", false);
+        assert_eq!(got, "факт. ", "got {got}");
     }
 }
