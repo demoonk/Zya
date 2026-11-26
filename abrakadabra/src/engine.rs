@@ -1,4 +1,4 @@
-//! Decision layer: given the token that was just typed, decide whether it was
+﻿//! Decision layer: given the token that was just typed, decide whether it was
 //! produced with the wrong keyboard layout.
 
 use crate::layout::{is_ambiguous, map_key, script_of, Script};
@@ -109,6 +109,7 @@ pub struct Config {
     /// mirroring the token once more. When off, every press mirrors the whole
     /// token, as in the classic version. Default: true.
     pub smart_undo: bool,
+    pub numpad_comma_as_dot: bool,
 }
 
 impl Default for Config {
@@ -130,6 +131,7 @@ impl Default for Config {
             hotkey_invert_last: "shift+break".into(),
             hotkey_add_word: "ctrl+`".into(),
             smart_undo: true,
+            numpad_comma_as_dot: true,
             whitelist: vec![
                 "ok".into(),
                 "git".into(),
@@ -252,6 +254,86 @@ fn punct_key(c: char) -> char {
 /// first-person "-ю" of "колю"/"стулю"/"плюлю", the soft "-ью" of "мышью", the
 /// doubled "-юю" of "своюю", the accusative "-ую" of "цветную". Everything else
 /// that ends a Russian word on `,` `.` or `;` is the key, not a letter.
+
+fn punct_mirror_letter(c: char) -> Option<char> {
+    match c {
+        'б' => Some(','),
+        'Б' => Some('.'),
+        'ю' => Some('.'),
+        'Ю' => Some(','),
+        'ж' => Some(';'),
+        'Ж' => Some(':'),
+        'э' => Some('"'),
+        'Э' => Some('"'),
+        _ => None,
+    }
+}
+
+/// A cascade signature: `out` differs from `input` in at most the last two
+/// characters and every changed input character is a punctuation-mirror letter
+/// (the engine mirrored just the tail and kept the word, or vice versa).
+/// Whole-word mirrors (дюйма -> l.qvf) are NOT tail-only.
+fn tail_only_punct_change(input: &str, out: &str) -> bool {
+    let a: Vec<char> = input.chars().collect();
+    let b: Vec<char> = out.chars().collect();
+    if a.len() != b.len() || a.is_empty() {
+        return false;
+    }
+    let diffs: Vec<usize> = a
+        .iter()
+        .zip(b.iter())
+        .enumerate()
+        .filter(|(_, (x, y))| x != y)
+        .map(|(i, _)| i)
+        .collect();
+    if diffs.is_empty() || diffs.len() > 2 || diffs[0] < a.len().saturating_sub(2) {
+        return false;
+    }
+    diffs
+        .iter()
+        .all(|&i| punct_mirror_letter(a[i]).is_some() || punct_mirror_letter(b[i]).is_some())
+}
+
+/// A1 (step 3): the token ends in a punctuation-mirror letter (`,` `.` `;` `"`
+/// typed while the layout was still Russian). Restore only when the head
+/// mirrors with a real margin (converted != head) and the token's Latin mirror
+/// is not a believable English word ("гитхаб" belongs to the layout layer).
+fn restore_punct_tail(engine: &Engine, token: &str, prev: &str) -> Option<Decision> {
+    let c = token.chars().last()?;
+    let punct = punct_mirror_letter(c)?;
+    if token.chars().count() < engine.cfg.min_len + 2 {
+        return None;
+    }
+    let head = token.strip_suffix(c)?;
+    if head.chars().count() < engine.cfg.min_len {
+        return None;
+    }
+    if is_letter_tail(token) {
+        return None;
+    }
+    // A real Russian word ("говорю", "знаю") keeps its letters untouched.
+    if engine.believable_word(token) {
+        return None;
+    }
+    // A wrong-layout English word belongs to the mirror layer only.
+    let full = crate::layout::mirror_token(token);
+    if full.chars().any(|ch| ch.is_ascii_alphabetic()) && engine.believable_word(&full) {
+        return None;
+    }
+    // Mirror-head branch: only a real mirror (converted != head) counts; a
+    // keep decision glued to a restored comma is the "гитха," bug.
+    if !looks_like_code(head) {
+        if let Some(mut d) = engine.decide_with(head, prev) {
+            if d.converted != head {
+                d.original = token.to_string();
+                d.converted = format!("{}{punct}", d.converted);
+                d.why = "restored punctuation tail on a mirrored head".to_string();
+                return Some(d);
+            }
+        }
+    }
+    None
+}
 fn is_letter_tail(word: &str) -> bool {
     let chars: Vec<char> = word.chars().collect();
     if chars.len() < 2 {
@@ -742,6 +824,14 @@ impl Engine {
                 .map(|&c| punct_key(c))
                 .collect::<String>()
         );
+        // A zero keep means the whole punct run was dropped. Right when the
+        // kept head reads as a Russian word ("ссылкаю"->"ссылка."); wrong
+        // when the head is word-shaped garbage ("гитхаб"->"гитха,"). Block
+        // only the garbage-head case; real letters stay untouched.
+        if keep == 0 && !self.believable_word(&head) {
+            self.note(format!("skip {token}: zero-keep strip, head not a Russian word"));
+            return None;
+        }
         if converted == token {
             return None;
         }
@@ -1076,7 +1166,7 @@ impl Engine {
     }
 
     pub fn decide(&self, token: &str) -> Option<Decision> {
-        self.decide_with(token, "")
+        self.decide_guarded(token, "")
     }
 
     /// L-09: does this token belong to the user's "never touch" list? Only the
@@ -1114,7 +1204,39 @@ impl Engine {
 
     /// `prev` is the token that was typed immediately before this one: the
     /// single-letter rules need that context, the others do not.
-    pub fn decide_with(&self, token: &str, prev: &str) -> Option<Decision> {
+
+    /// decide_with plus the B3 cascade validator and the A1 punct-tail restore:
+/// a tail-only punct-mirror change is never a whole-word fix (roll it back
+/// unless the restore heuristic genuinely improves it), and on a full refusal
+/// try restoring an eaten punctuation tail. Every real decision path
+/// (win.rs hook, sim.rs tech tests) goes through this method.
+pub fn decide_guarded(&self, token: &str, prev: &str) -> Option<Decision> {
+    let d = self.decide_with(token, prev);
+    if let Some(d) = &d {
+        if tail_only_punct_change(&d.original, &d.converted) {
+            // A wrong-layout English word belongs to the mirror layer only;
+            // a Russian punct-eaten fragment does not, so keep the engine fix.
+            let full = crate::layout::mirror_token(token);
+            if full.chars().any(|c| c.is_ascii_alphabetic()) && self.believable_word(&full) {
+                return None;
+            }
+            // The mirror-head restore may improve it; if it yields nothing
+            // the engine's own tail fix is kept (never drop a real fix).
+            if let Some(fixed) = restore_punct_tail(self, &d.original, prev) {
+                return Some(fixed);
+            }
+            return Some(d.clone());
+        }
+    }
+    if d.is_none() {
+        if let Some(fixed) = restore_punct_tail(self, token, prev) {
+            return Some(fixed);
+        }
+    }
+    d
+}
+
+pub fn decide_with(&self, token: &str, prev: &str) -> Option<Decision> {
         // The word-end key `? & / ^` is not a part of the word: judge the token
         // without it and attach it back to the decision. This way "pfghtn&" is
         // decided exactly like "pfghtn".

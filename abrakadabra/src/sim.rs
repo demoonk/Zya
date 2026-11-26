@@ -158,7 +158,7 @@ impl Sim {
             return;
         }
         let prev = self.prev.clone();
-        match engine.decide_with(word, &prev) {
+        match engine.decide_guarded(word, &prev) {
             Some(d) => {
                 self.switches += 1;
                 self.log.push((word.to_string(), d.converted.clone()));

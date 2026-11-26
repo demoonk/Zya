@@ -1,4 +1,4 @@
-//! User configuration, stored as JSON next to the diary.
+﻿//! User configuration, stored as JSON next to the diary.
 //!
 //! L-05: a broken `config.json` is never silently replaced by defaults. The
 //! corrupt file is kept as `config.json.bad-<timestamp>`, every write keeps a
@@ -49,6 +49,8 @@ pub struct FileConfig {
     pub hotkey_add_word: String,
     #[serde(default = "default_true")]
     pub smart_undo: bool,
+    #[serde(default = "default_true")]
+    pub numpad_comma_as_dot: bool,
     #[serde(default)]
     pub whitelist: Vec<String>,
     #[serde(default)]
@@ -111,6 +113,7 @@ fn default_hotkey_invert_last() -> String {
 fn default_hotkey_add_word() -> String {
     "ctrl+`".into()
 }
+fn default_numpad_comma_as_dot() -> bool { true }
 fn default_true() -> bool {
     true
 }
@@ -277,6 +280,7 @@ pub fn sanitize(c: &Config) -> Config {
             &mut warnings,
         ),
         smart_undo: c.smart_undo,
+            numpad_comma_as_dot: c.numpad_comma_as_dot,
         whitelist: clean_list("whitelist", &c.whitelist, &mut warnings),
         short_ru: clean_words("short_ru", &c.short_ru, &mut warnings),
         short_en: clean_words("short_en", &c.short_en, &mut warnings),
@@ -312,6 +316,7 @@ impl From<&Config> for FileConfig {
             hotkey_invert_last: c.hotkey_invert_last.clone(),
             hotkey_add_word: c.hotkey_add_word.clone(),
             smart_undo: c.smart_undo,
+            numpad_comma_as_dot: c.numpad_comma_as_dot,
             whitelist: c.whitelist.clone(),
             short_ru: c.short_ru.clone(),
             short_en: c.short_en.clone(),
@@ -456,6 +461,7 @@ pub fn load() -> Config {
             hotkey_invert_last: f.hotkey_invert_last,
             hotkey_add_word: f.hotkey_add_word,
             smart_undo: f.smart_undo,
+            numpad_comma_as_dot: f.numpad_comma_as_dot,
             whitelist: f.whitelist,
             short_ru: f.short_ru,
             short_en: f.short_en,

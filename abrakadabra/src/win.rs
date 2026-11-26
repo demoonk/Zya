@@ -424,6 +424,7 @@ static APP: OnceLock<Mutex<App>> = OnceLock::new();
 static HOOK: AtomicUsize = AtomicUsize::new(0);
 static LOCK_FILE: OnceLock<usize> = OnceLock::new();
 static EVENTS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+static NUMPAD_DOT_SWALLOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn event_count() -> i64 {
     EVENTS.load(std::sync::atomic::Ordering::Relaxed)
@@ -2142,6 +2143,31 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
             a.alt_pending = false;
             if was_alone && a.hotkey_undo.alt && a.hotkey_undo.vk == VK_LMENU.0 {
                 undo_last(&mut a, true);
+            }
+        }
+        return CallNextHookEx(None, code, wparam, lparam);
+    }
+
+    // L-40: in the Russian layout the numpad "." key types "," (RU decimal
+    // separator). With the setting on (default), while Russian layout is
+    // active and NumLock is on, zya sends a real "." instead. NumLock off
+    // makes this key Delete: leave it to the OS unchanged.
+    if vk == 0x6E {
+        if up {
+            if NUMPAD_DOT_SWALLOW.load(std::sync::atomic::Ordering::Relaxed) {
+                NUMPAD_DOT_SWALLOW.store(false, std::sync::atomic::Ordering::Relaxed);
+                return LRESULT(1);
+            }
+        } else if (GetKeyState(0x90) & 1) != 0 && !ctrl_held && !alt_held && !win_held {
+            let go = {
+                let a = app().lock().unwrap_or_else(|e| e.into_inner());
+                a.lang == RU_LANGID && a.engine.cfg.numpad_comma_as_dot
+            };
+            if go {
+                NUMPAD_DOT_SWALLOW.store(true, std::sync::atomic::Ordering::Relaxed);
+                let mut items = [unicode('.', false), unicode('.', true)];
+                let _ = SendInput(&mut items, std::mem::size_of::<INPUT>() as i32);
+                return LRESULT(1);
             }
         }
         return CallNextHookEx(None, code, wparam, lparam);

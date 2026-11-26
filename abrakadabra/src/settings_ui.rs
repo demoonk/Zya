@@ -1,4 +1,4 @@
-//! Settings window for ZЯ.
+﻿//! Settings window for ZЯ.
 //!
 //! Plain Win32, no UI framework: the window is painted by hand (rounded cards,
 //! a left column of tabs, a header) and every control is either an owner-drawn
@@ -118,6 +118,7 @@ const LAUNCH_HINT_Y: i32 = 396;
 const SMART_COL_X: i32 = CONTENT_X + 464;
 const SMART_COL_W: i32 = 416;
 const CB_SMART_Y: i32 = 254;
+const CB_NUMPAD_DOT_Y: i32 = 210;
 const SMART_HINT_Y: i32 = 290;
 const HOTKEY_CARD_Y: i32 = 440;
 const HOTKEY_CARD_H: i32 = 312;
@@ -200,12 +201,13 @@ const FILTER_W: i32 = 180;
 const FILTER_LABEL_W: i32 = 84;
 const ROW_GAP: i32 = 10;
 
-const CONTROLS: [ControlSpec; 20] = [
+const CONTROLS: [ControlSpec; 21] = [
     ControlSpec { role: BTN_CONFIG, label: "Открыть файл конфигурации", x: 0, y: HEADER_TOP, width: 280, height: 34, max_width: 320, anchored_right: true },
     ControlSpec { role: BTN_UPDATE, label: "Проверить обновления", x: 0, y: 112, width: 200, height: 40, max_width: 260, anchored_right: true },
     ControlSpec { role: CB_AUTOSTART, label: "Автозапуск при входе", x: INNER_LEFT, y: CB_AUTOSTART_Y, width: 430, height: 38, max_width: 440, anchored_right: false },
     ControlSpec { role: CB_ADMIN, label: "Запускать как администратор", x: INNER_LEFT, y: CB_ADMIN_Y, width: 430, height: 38, max_width: 440, anchored_right: false },
     ControlSpec { role: CB_AUTO_LAYOUT, label: "Автоисправление раскладки", x: INNER_LEFT, y: CB_AUTO_Y, width: 430, height: 28, max_width: 440, anchored_right: false },
+    ControlSpec { role: CB_NUMPAD_DOT, label: "······ «.» · «.» · ······· ······", x: SMART_COL_X, y: CB_NUMPAD_DOT_Y, width: SMART_COL_W, height: 34, max_width: 416, anchored_right: false },
     ControlSpec { role: CB_SMART_UNDO, label: "Умная отмена", x: SMART_COL_X, y: CB_SMART_Y, width: SMART_COL_W, height: 34, max_width: 416, anchored_right: false },
     ControlSpec { role: BTN_HOTKEY_RESET, label: "Сбросить", x: 0, y: HOTKEY_CARD_Y + 14, width: 120, height: 32, max_width: 160, anchored_right: true },
     ControlSpec { role: BTN_ADD_PROCESSES, label: "Добавить активное приложение", x: INNER_LEFT, y: 128, width: IGNORE_SLOT, height: 40, max_width: 0, anchored_right: false },
@@ -247,6 +249,7 @@ const HOTKEY_LIST: usize = 122;
 const BTN_HOTKEY_RESET: usize = 123;
 const HOTKEY_SEL_LIST: usize = 124;
 const CB_SMART_UNDO: usize = 125;
+const CB_NUMPAD_DOT: usize = 126;
 
 const BTN_ADD_PROCESSES: usize = 130;
 const BTN_ADD_PROCESS: usize = 131;
@@ -2179,6 +2182,7 @@ unsafe extern "system" fn settings_proc(
                 CB_ADMIN => toggle_admin_autostart(),
                 CB_AUTO_LAYOUT => toggle_auto_layout(),
                 CB_SMART_UNDO => toggle_smart_undo(),
+    CB_NUMPAD_DOT => toggle_numpad_dot(),
                 BTN_HOTKEY_RESET => reset_hotkeys(),
                 BTN_ADD_PROCESSES => add_foreground_process(),
                 BTN_ADD_PROCESS => show_ignore_input(),
@@ -2540,11 +2544,12 @@ unsafe fn draw_button(info: &DRAWITEMSTRUCT, hwnd: HWND) {
                 );
             }
         }
-        CB_AUTOSTART | CB_ADMIN | CB_AUTO_LAYOUT | CB_SMART_UNDO => {
+        CB_AUTOSTART | CB_ADMIN | CB_AUTO_LAYOUT | CB_SMART_UNDO | CB_NUMPAD_DOT => {
             let checked = match role {
                 CB_AUTOSTART => get_cfg().autostart,
                 CB_ADMIN => get_cfg().admin_autostart,
                 CB_SMART_UNDO => get_cfg().smart_undo,
+    CB_NUMPAD_DOT => get_cfg().numpad_comma_as_dot,
                 _ => crate::win::auto_enabled(),
             };
             let box_fill = if pressed {
@@ -2967,6 +2972,7 @@ fn label_of(role: usize) -> String {
         CB_ADMIN => "Запускать как администратор".into(),
         CB_AUTO_LAYOUT => "Автоисправление раскладки".into(),
         CB_SMART_UNDO => "Умная отмена".into(),
+    CB_NUMPAD_DOT => "Numpad «.» -> «.» в русской раскладке".into(),
         BTN_HOTKEY_RESET => "Сбросить".into(),
         BTN_ADD_PROCESSES => "Добавить активное приложение".into(),
         BTN_ADD_PROCESS => "Добавить новый процесс".into(),
@@ -3548,11 +3554,20 @@ unsafe fn toggle_smart_undo() {
     let next = !get_cfg().smart_undo;
     apply_config(|config| config.smart_undo = next);
     crate::win::reload_hotkeys(&get_cfg());
+
+
     repaint_main();
     update_status(&format!(
         "Умная отмена: {}",
         if next { "включена" } else { "выключена" }
     ));
+}
+
+unsafe fn toggle_numpad_dot() {
+    let next = !get_cfg().numpad_comma_as_dot;
+    apply_config(|config| config.numpad_comma_as_dot = next);
+    crate::win::apply_config_to_app(&crate::config::load());
+    repaint_main();
 }
 
 unsafe fn reset_hotkeys() {
