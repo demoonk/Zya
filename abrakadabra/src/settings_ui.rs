@@ -2006,6 +2006,7 @@ fn visibility_groups() -> [(usize, &'static [usize]); 4] {
                 CB_AUTOSTART,
                 CB_ADMIN,
                 CB_AUTO_LAYOUT,
+                CB_NUMPAD_DOT,
                 CB_SMART_UNDO,
                 BTN_HOTKEY_RESET,
                 HOTKEY_LIST,
@@ -6316,6 +6317,28 @@ mod tests {
             if *index != TAB_LEXICON - TAB_SETTINGS {
                 assert!(!roles.contains(&LEX_LIST), "the word list must be hidden on other pages");
             }
+        }
+        // Every declared control must belong to a page group, otherwise it is
+        // never hidden and bleeds onto the other pages: the numpad switch used to
+        // fall through exactly like that and show up on the Игнорировать page.
+        // The ignore input line is the only exception, it is shown on demand.
+        for spec in &CONTROLS {
+            // Header and on-demand controls live outside page groups on purpose:
+            // the config button is painted on every page, the ignore input line
+            // is shown only when the user opens it.
+            if spec.role == BTN_CONFIG
+                || spec.role == IGNORE_INPUT
+                || spec.role == BTN_ADD_COMMIT
+            {
+                continue;
+            }
+            assert!(
+                groups
+                    .iter()
+                    .any(|(_, roles)| roles.contains(&spec.role)),
+                "control role {} is in no visibility group",
+                spec.role
+            );
         }
     }
 
