@@ -1,4 +1,4 @@
-//! Update check for ZЯ.
+﻿//! Update check for ZЯ.
 //!
 //! The app talks to the GitHub Releases API of `demoonk/Zya` with WinHTTP — no
 //! third-party HTTP crate is linked into the 6 MB binary. When a newer release
@@ -246,7 +246,17 @@ pub fn check_latest() -> Option<Release> {
         eprintln!("update: body {} bytes: {head}", body.len());
     }
     let parsed: ReleaseJson = serde_json::from_slice(&body).ok()?;
-    let asset = parsed.assets.iter().find(|a| a.name.eq_ignore_ascii_case("z.exe"))?;
+    let asset = parsed
+        .assets
+        .iter()
+        .find(|a| a.name.eq_ignore_ascii_case("z.exe"))
+        .or_else(|| parsed.assets.iter().find(|a| a.name.eq_ignore_ascii_case("z_single_launcher.exe")))
+        .or_else(||
+            parsed.assets.iter().find(|a| a.name.to_lowercase().starts_with("z")
+                && a.name.to_lowercase().ends_with(".exe")
+                && a.size > 1024 * 1024),
+        )
+        ?;
     Some(Release {
         version: parsed.tag_name.trim_start_matches('v').trim().to_string(),
         url: asset.browser_download_url.clone(),
