@@ -25,12 +25,12 @@ use windows::Win32::Foundation::{
     CloseHandle, COLORREF, GlobalFree, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    BACKGROUND_MODE, ArcTo, BeginPath, CLIP_DEFAULT_PRECIS, BeginPaint, CreateFontW, CreatePen,
-    CreateSolidBrush, ANTIALIASED_QUALITY, DEFAULT_CHARSET, DeleteObject, DrawTextW, EndPath, EndPaint,
-    FillPath, FillRect, FF_MODERN, GetDC, GetMonitorInfoW, GetTextExtentPoint32W, HGDIOBJ, HDC, LineTo,
+    BACKGROUND_MODE, CLIP_DEFAULT_PRECIS, BeginPaint, CreateFontW, CreatePen,
+    CreateSolidBrush, ANTIALIASED_QUALITY, DEFAULT_CHARSET, DeleteObject, DrawTextW, EndPaint,
+    FillRect, FF_MODERN, GetDC, GetMonitorInfoW, GetTextExtentPoint32W, HGDIOBJ, HDC, LineTo,
     MonitorFromPoint, MONITOR_DEFAULTTONEAREST, MONITORINFO, MoveToEx, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
     PS_SOLID, ReleaseDC, ClientToScreen, ScreenToClient, SelectObject, SetBkColor, SetBkMode,
-    SetTextColor, StrokePath, TRANSPARENT, RoundRect,
+    SetTextColor, TRANSPARENT, RoundRect,
 };
 use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -888,57 +888,6 @@ unsafe fn draw_text(hdc: HDC, text: &str, rect: &RECT, font: HGDIOBJ, color: COL
     let _ = SetBkMode(hdc, BACKGROUND_MODE(old_bk.max(0) as u32));
 }
 
-// The outline of a rounded rectangle as a GDI path. Walking it in the order
-// that keeps every corner on the short (90 degree) arc is what makes the shape
-// round instead of "bitten in".
-unsafe fn rounded_path(hdc: HDC, left: i32, top: i32, width: i32, height: i32, r: i32) -> bool {
-    let right = left + width;
-    let bottom = top + height;
-    if !BeginPath(hdc).as_bool() {
-        return false;
-    }
-    let _ = MoveToEx(hdc, left, top + r, None);
-    let _ = LineTo(hdc, left, bottom - r);
-    let _ = ArcTo(
-        hdc,
-        left,
-        bottom - 2 * r,
-        left + 2 * r,
-        bottom,
-        left,
-        bottom - r,
-        left + r,
-        bottom,
-    );
-    let _ = LineTo(hdc, right - r, bottom);
-    let _ = ArcTo(
-        hdc,
-        right - 2 * r,
-        bottom - 2 * r,
-        right,
-        bottom,
-        right - r,
-        bottom,
-        right,
-        bottom - r,
-    );
-    let _ = LineTo(hdc, right, top + r);
-    let _ = ArcTo(
-        hdc,
-        right - 2 * r,
-        top,
-        right,
-        top + 2 * r,
-        right,
-        top + r,
-        right - r,
-        top,
-    );
-    let _ = LineTo(hdc, left + r, top);
-    let _ = ArcTo(hdc, left, top, left + 2 * r, top + 2 * r, left + r, top, left, top + r);
-    EndPath(hdc).as_bool()
-}
-
 unsafe fn rounded(
     hdc: HDC,
     left: i32,
@@ -950,28 +899,31 @@ unsafe fn rounded(
     border: COLORREF,
     // The colour that surrounds the shape. `RoundRect` paints the four wedges
     // between its arcs and the bounding rectangle with the DC *background*
-    // colour (black by default), which is what made every rounded corner look
-    // like it had a black triangle in it. We paint the backdrop first and then
-    // fill a true rounded path, so nothing is left to bleed into the corners.
+    // colour, so the backdrop is set explicitly before the frame is drawn:
+    // nothing is left to bleed into the corners.
     bg: COLORREF,
 ) {
     if width <= 0 || height <= 0 {
         return;
     }
+    // The owner-draw DC is clipped to the button's client rectangle, whose last
+    // column and row are width-1 and height-1. Frames stroked exactly at
+    // left+width and top+height sat one pixel outside that clip, so the right
+    // and bottom sides were cut away and the outline looked torn at the corners.
+    // Inset the shape by a pixel: every side lands inside the clip, and
+    // `RoundRect` fills and strokes the whole border in a single operation, so
+    // no side can drop out (a 1 px `StrokePath` over a mixed arc-and-line path
+    // used to lose straight segments between the arcs).
+    let right = left + width - 1;
+    let bottom = top + height - 1;
+    let r = radius.max(1).min((width - 1) / 2).min((height - 1) / 2);
     fill_rect(hdc, left, top, width, height, bg);
-    let r = radius.max(1).min(width / 2).min(height / 2);
+    let _ = SetBkColor(hdc, bg);
     let brush = CreateSolidBrush(fill);
     let pen = CreatePen(PS_SOLID, 1, border);
     let old_brush = SelectObject(hdc, HGDIOBJ(brush.0));
     let old_pen = SelectObject(hdc, HGDIOBJ(pen.0));
-    // `FillPath` closes and destroys the path, so the outline has to be rebuilt
-    // before it can be stroked; a single path would leave the border invisible.
-    if rounded_path(hdc, left, top, width, height, r) {
-        let _ = FillPath(hdc);
-    }
-    if rounded_path(hdc, left, top, width, height, r) {
-        let _ = StrokePath(hdc);
-    }
+    let _ = RoundRect(hdc, left, top, right, bottom, 2 * r, 2 * r);
     // DeleteObject on an object that is still selected in the DC fails and
     // silently leaks it, so deselect first, then delete.
     let _ = SelectObject(hdc, old_pen);
