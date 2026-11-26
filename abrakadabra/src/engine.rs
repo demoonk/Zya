@@ -1,4 +1,4 @@
-﻿//! Decision layer: given the token that was just typed, decide whether it was
+//! Decision layer: given the token that was just typed, decide whether it was
 //! produced with the wrong keyboard layout.
 
 use crate::layout::{is_ambiguous, map_key, script_of, Script};
@@ -431,6 +431,29 @@ impl Engine {
         lang.score(&letters).unwrap_or(INVALID) >= floor
     }
 
+    /// Is the head in front of a fully stripped `,`/`.`/`;` run a word the
+    /// user really typed? Dictionary hits and inflections pass outright; a
+    /// stem too rare for the top-50k list still passes when it ends like a
+    /// Russian word and the letter model does not reject it outright
+    /// ("огнутых" in "огнутыхб"). Latin-soup heads such as "гитха" fail the
+    /// ending check and keep their letters, which is what protects "гитхаб".
+    fn zero_keep_head_ok(&self, head: &str) -> bool {
+        if self.believable_word(head) {
+            return true;
+        }
+        let letters: String = head.chars().filter(|c| c.is_alphabetic()).collect();
+        if letters.chars().count() < 3 || script_of(&letters) != Some(Script::Cyrillic) {
+            return false;
+        }
+        if !self.model.ru.ends_like_word(&letters) {
+            return false;
+        }
+        let floor = self.cfg.plausibility
+            * ((letters.chars().count() as f32) / 6.0).max(1.0)
+            * 1.5;
+        self.model.ru.score(&letters).unwrap_or(INVALID) >= floor
+    }
+
     /// Keys such as `,` `.` `;` `'` produce punctuation in one layout and a
     /// letter in the other, so the same token can be read in several ways.
     /// Letters are always mirrored; each ambiguous key is tried both ways.
@@ -828,7 +851,7 @@ impl Engine {
         // kept head reads as a Russian word ("ссылкаю"->"ссылка."); wrong
         // when the head is word-shaped garbage ("гитхаб"->"гитха,"). Block
         // only the garbage-head case; real letters stay untouched.
-        if keep == 0 && !self.believable_word(&head) {
+        if keep == 0 && !self.zero_keep_head_ok(&head) {
             self.note(format!("skip {token}: zero-keep strip, head not a Russian word"));
             return None;
         }
@@ -1630,6 +1653,19 @@ mod tests {
     /// check that the engine recovers them.
     /// A Cyrillic token ending in б/ю/ж that is not a word was really `,` `.`
     /// `;` typed while the layout was still Russian.
+    /// The zero-keep guard: a borrowed name typed in Cyrillic ("гитхаб") must
+    /// never lose its last letter to a comma, while a rare but genuine Russian
+    /// stem ("огнутых") still gets its punctuation key back.
+    #[test]
+    fn the_zero_keep_guard_protects_transliterated_names() {
+        let e = engine();
+        assert!(e.decide("гитхаб").is_none(), "гитхаб keeps its letters");
+        assert!(e.decide("гитхабю").is_none(), "гитхаб plus a dot key keeps its letters");
+        let d = e.decide("огнутыхб").expect("огнутых is a real stem");
+        assert_eq!(d.converted, "огнутых,");
+        assert!(!d.flip);
+    }
+
     #[test]
     fn punctuation_after_a_russian_stem_is_restored() {
         let e = engine();

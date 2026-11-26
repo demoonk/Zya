@@ -1,4 +1,4 @@
-﻿//! Settings window for ZЯ.
+//! Settings window for ZЯ.
 //!
 //! Plain Win32, no UI framework: the window is painted by hand (rounded cards,
 //! a left column of tabs, a header) and every control is either an owner-drawn
@@ -30,7 +30,7 @@ use windows::Win32::Graphics::Gdi::{
     FillPath, FillRect, FF_MODERN, GetDC, GetMonitorInfoW, GetTextExtentPoint32W, HGDIOBJ, HDC, LineTo,
     MonitorFromPoint, MONITOR_DEFAULTTONEAREST, MONITORINFO, MoveToEx, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
     PS_SOLID, ReleaseDC, ClientToScreen, ScreenToClient, SelectObject, SetBkColor, SetBkMode,
-    SetTextColor, StrokePath, TRANSPARENT,
+    SetTextColor, StrokePath, TRANSPARENT, RoundRect,
 };
 use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -113,13 +113,17 @@ const LAUNCH_CARD_H: i32 = 216;
 const CB_AUTOSTART_Y: i32 = 254;
 const CB_ADMIN_Y: i32 = 296;
 const CB_AUTO_Y: i32 = 338;
-const LAUNCH_HINT_Y: i32 = 396;
+const LAUNCH_HINT_Y: i32 = 374;
 // Right column of the same card: the Break behaviour and its explanation.
 const SMART_COL_X: i32 = CONTENT_X + 464;
 const SMART_COL_W: i32 = 416;
-const CB_SMART_Y: i32 = 254;
-const CB_NUMPAD_DOT_Y: i32 = 210;
-const SMART_HINT_Y: i32 = 290;
+// The switches line up with the left column row by row: Numpad on the first
+// row, the smart-undo block on the second. The block runs down to the inner
+// bottom of the card, so its rounded frame is never cut by the card border.
+const CB_SMART_Y: i32 = 296;
+const CB_NUMPAD_DOT_Y: i32 = 254;
+const SMART_BLOCK_H: i32 = 120;
+const SMART_HINT_Y: i32 = 334;
 const HOTKEY_CARD_Y: i32 = 440;
 const HOTKEY_CARD_H: i32 = 312;
 // Two tables side by side: the hotkeys that work on the last token without any
@@ -208,7 +212,7 @@ const CONTROLS: [ControlSpec; 21] = [
     ControlSpec { role: CB_ADMIN, label: "Запускать как администратор", x: INNER_LEFT, y: CB_ADMIN_Y, width: 430, height: 38, max_width: 440, anchored_right: false },
     ControlSpec { role: CB_AUTO_LAYOUT, label: "Автоисправление раскладки", x: INNER_LEFT, y: CB_AUTO_Y, width: 430, height: 28, max_width: 440, anchored_right: false },
     ControlSpec { role: CB_NUMPAD_DOT, label: "······ «.» · «.» · ······· ······", x: SMART_COL_X, y: CB_NUMPAD_DOT_Y, width: SMART_COL_W, height: 34, max_width: 416, anchored_right: false },
-    ControlSpec { role: CB_SMART_UNDO, label: "Умная отмена", x: SMART_COL_X, y: CB_SMART_Y, width: SMART_COL_W, height: 34, max_width: 416, anchored_right: false },
+    ControlSpec { role: CB_SMART_UNDO, label: "Умная отмена", x: SMART_COL_X, y: CB_SMART_Y, width: SMART_COL_W, height: SMART_BLOCK_H, max_width: 416, anchored_right: false },
     ControlSpec { role: BTN_HOTKEY_RESET, label: "Сбросить", x: 0, y: HOTKEY_CARD_Y + 14, width: 120, height: 32, max_width: 160, anchored_right: true },
     ControlSpec { role: BTN_ADD_PROCESSES, label: "Добавить активное приложение", x: INNER_LEFT, y: 128, width: IGNORE_SLOT, height: 40, max_width: 0, anchored_right: false },
     ControlSpec { role: BTN_ADD_PROCESS, label: "Добавить новый процесс", x: INNER_LEFT + IGNORE_SLOT + 16, y: 128, width: IGNORE_SLOT, height: 40, max_width: 0, anchored_right: false },
@@ -1143,20 +1147,23 @@ unsafe fn paint_settings_page(hdc: HDC, dpi: u32) {
             | windows::Win32::Graphics::Gdi::DT_VCENTER
             | windows::Win32::Graphics::Gdi::DT_SINGLELINE,
     );
+    // The smart-undo explanation is painted inside the switch's own outlined
+    // block by draw_button; the card only keeps the two autostart hint lines,
+    // confined to the left column so they never run under the block.
     draw_text(
         hdc,
-        SMART_UNDO_TEXT,
-        // Wrapped paragraph, not a single line: DT_SINGLELINE would cut the
-        // explanation off at the first line.
-        &rect_at(SMART_COL_X, SMART_HINT_Y, SMART_COL_W, 96, dpi),
+        "Автозапуск — запись в раздел Run.",
+        &rect_at(CONTENT_X + CARD_PAD, LAUNCH_HINT_Y, 424, 20, dpi),
         fonts(dpi).dim,
         dim_color(),
-        windows::Win32::Graphics::Gdi::DT_LEFT | windows::Win32::Graphics::Gdi::DT_TOP,
+        windows::Win32::Graphics::Gdi::DT_LEFT
+            | windows::Win32::Graphics::Gdi::DT_VCENTER
+            | windows::Win32::Graphics::Gdi::DT_SINGLELINE,
     );
     draw_text(
         hdc,
-        "Автозапуск — запись в раздел Run. «Как администратор» — задание ZyaAutoStart в Планировщике заданий с уровнем HIGHEST.",
-        &rect_at(CONTENT_X + CARD_PAD, LAUNCH_HINT_Y, 864, 22, dpi),
+        "«Как администратор» — задание ZyaAutoStart с уровнем HIGHEST.",
+        &rect_at(CONTENT_X + CARD_PAD, LAUNCH_HINT_Y + 22, 424, 20, dpi),
         fonts(dpi).dim,
         dim_color(),
         windows::Win32::Graphics::Gdi::DT_LEFT
@@ -2549,7 +2556,7 @@ unsafe fn draw_button(info: &DRAWITEMSTRUCT, hwnd: HWND) {
                 CB_AUTOSTART => get_cfg().autostart,
                 CB_ADMIN => get_cfg().admin_autostart,
                 CB_SMART_UNDO => get_cfg().smart_undo,
-    CB_NUMPAD_DOT => get_cfg().numpad_comma_as_dot,
+                CB_NUMPAD_DOT => get_cfg().numpad_comma_as_dot,
                 _ => crate::win::auto_enabled(),
             };
             let box_fill = if pressed {
@@ -2566,25 +2573,45 @@ unsafe fn draw_button(info: &DRAWITEMSTRUCT, hwnd: HWND) {
                 s(8, dpi),
                 box_fill,
                 card_border(),
-                backdrop,
+                // The control sits on the card surface: filling the corner
+                // wedges with the card colour (not the window backdrop) keeps
+                // the frame whole instead of punching holes in the card.
+                box_fill,
             );
             let mark = s(20, dpi);
             let mark_left = rect.left + s(12, dpi);
-            let mark_top = rect.top + (height - mark) / 2;
+            // Smart undo is a block: the switch on its top row, the
+            // explanation painted inside the same rounded frame.
+            let is_block = role == CB_SMART_UNDO;
+            let mark_top = if is_block {
+                rect.top + s(7, dpi)
+            } else {
+                rect.top + (height - mark) / 2
+            };
+            let radius = 2 * s(4, dpi);
             if checked {
-                rounded(
+                // RoundRect fills the corner wedges with the brush itself: a
+                // stroked arc path on a 20 px mark leaves stair-step gaps at
+                // the rounded corners, and RoundRect does not.
+                let brush = CreateSolidBrush(accent_color());
+                let pen = CreatePen(PS_SOLID, 1, accent_color());
+                let old_brush = SelectObject(info.hDC, HGDIOBJ(brush.0));
+                let old_pen = SelectObject(info.hDC, HGDIOBJ(pen.0));
+                let _ = RoundRect(
                     info.hDC,
                     mark_left,
                     mark_top,
-                    mark,
-                    mark,
-                    s(4, dpi),
-                    accent_color(),
-                    accent_color(),
-                    box_fill,
+                    mark_left + mark,
+                    mark_top + mark,
+                    radius,
+                    radius,
                 );
-                let pen = CreatePen(PS_SOLID, s(2, dpi), rgb(255, 255, 255));
-                let old_pen = SelectObject(info.hDC, HGDIOBJ(pen.0));
+                let _ = SelectObject(info.hDC, old_pen);
+                let _ = SelectObject(info.hDC, old_brush);
+                let _ = DeleteObject(HGDIOBJ(pen.0));
+                let _ = DeleteObject(HGDIOBJ(brush.0));
+                let tick = CreatePen(PS_SOLID, s(2, dpi), rgb(255, 255, 255));
+                let old_tick = SelectObject(info.hDC, HGDIOBJ(tick.0));
                 let _ = MoveToEx(
                     info.hDC,
                     mark_left + s(4, dpi),
@@ -2595,20 +2622,26 @@ unsafe fn draw_button(info: &DRAWITEMSTRUCT, hwnd: HWND) {
                 let _ = LineTo(info.hDC, mark_left + s(16, dpi), mark_top + s(5, dpi));
                 // The tick pen is still selected: deselect before deleting, or the
                 // object survives every repaint of a checked box.
-                let _ = SelectObject(info.hDC, old_pen);
-                let _ = DeleteObject(HGDIOBJ(pen.0));
+                let _ = SelectObject(info.hDC, old_tick);
+                let _ = DeleteObject(HGDIOBJ(tick.0));
             } else {
-                rounded(
+                let brush = CreateSolidBrush(bg_color());
+                let pen = CreatePen(PS_SOLID, 1, card_border());
+                let old_brush = SelectObject(info.hDC, HGDIOBJ(brush.0));
+                let old_pen = SelectObject(info.hDC, HGDIOBJ(pen.0));
+                let _ = RoundRect(
                     info.hDC,
                     mark_left,
                     mark_top,
-                    mark,
-                    mark,
-                    s(4, dpi),
-                    bg_color(),
-                    card_border(),
-                    box_fill,
+                    mark_left + mark,
+                    mark_top + mark,
+                    radius,
+                    radius,
                 );
+                let _ = SelectObject(info.hDC, old_pen);
+                let _ = SelectObject(info.hDC, old_brush);
+                let _ = DeleteObject(HGDIOBJ(pen.0));
+                let _ = DeleteObject(HGDIOBJ(brush.0));
             }
             let text_left = mark_left + mark + s(10, dpi);
             let text_right = rect.right - pad;
@@ -2619,7 +2652,11 @@ unsafe fn draw_button(info: &DRAWITEMSTRUCT, hwnd: HWND) {
                     left: text_left,
                     top: rect.top,
                     right: text_right,
-                    bottom: rect.bottom,
+                    bottom: if is_block {
+                        rect.top + s(34, dpi)
+                    } else {
+                        rect.bottom
+                    },
                 },
                 fitting_font(info.hDC, dpi, &caption, text_right - text_left),
                 fg_color(),
@@ -2627,6 +2664,22 @@ unsafe fn draw_button(info: &DRAWITEMSTRUCT, hwnd: HWND) {
                     | windows::Win32::Graphics::Gdi::DT_VCENTER
                     | windows::Win32::Graphics::Gdi::DT_SINGLELINE,
             );
+            if is_block {
+                draw_text(
+                    info.hDC,
+                    SMART_UNDO_TEXT,
+                    &RECT {
+                        left: rect.left + pad,
+                        top: rect.top + s(SMART_HINT_Y - CB_SMART_Y, dpi),
+                        right: rect.right - pad,
+                        bottom: rect.bottom - s(4, dpi),
+                    },
+                    fonts(dpi).dim,
+                    dim_color(),
+                    windows::Win32::Graphics::Gdi::DT_LEFT
+                        | windows::Win32::Graphics::Gdi::DT_TOP,
+                );
+            }
         }
         BTN_UPDATE => {
             let available = UPDATE_AVAILABLE.load(Ordering::Relaxed);
@@ -5574,13 +5627,18 @@ mod tests {
     fn the_smart_undo_switch_is_in_the_general_settings_card() {
         assert_eq!(label_of(CB_SMART_UNDO), "Умная отмена");
         // The switch lives in the "Запуск" card, not in the hotkey card.
-        assert!(CB_SMART_Y >= LAUNCH_CARD_Y && CB_SMART_Y + 34 <= LAUNCH_CARD_Y + LAUNCH_CARD_H);
+        assert!(CB_SMART_Y >= LAUNCH_CARD_Y && CB_SMART_Y + SMART_BLOCK_H <= LAUNCH_CARD_Y + LAUNCH_CARD_H);
         assert!(SMART_COL_X >= CONTENT_X + CARD_PAD + 320, "the switch crowds the card title");
         assert!(SMART_COL_X + SMART_COL_W <= CONTENT_X + CONTENT_WIDTH);
-        // The explanation sits under the switch and does not touch the hint line.
-        assert!(SMART_HINT_Y >= CB_SMART_Y + 34);
-        assert!(SMART_HINT_Y + 96 <= LAUNCH_HINT_Y);
-        assert!(LAUNCH_HINT_Y + 22 <= LAUNCH_CARD_Y + LAUNCH_CARD_H);
+        // The right column lines up with the left one row by row.
+        assert!(CB_NUMPAD_DOT_Y == CB_AUTOSTART_Y, "the numpad switch joins the first row");
+        assert!(CB_SMART_Y == CB_ADMIN_Y, "the smart-undo block joins the second row");
+        // The explanation lives inside the switch's own block, and the block
+        // ends exactly at the inner bottom of the card, so nothing is cut off.
+        assert!(SMART_HINT_Y >= CB_SMART_Y + 36);
+        assert!(SMART_HINT_Y + 80 <= CB_SMART_Y + SMART_BLOCK_H);
+        assert!(CB_SMART_Y + SMART_BLOCK_H == LAUNCH_CARD_Y + LAUNCH_CARD_H - CARD_PAD);
+        assert!(LAUNCH_HINT_Y + 44 <= LAUNCH_CARD_Y + LAUNCH_CARD_H);
         // The two cards still do not overlap, and the hotkey list fits in its card.
         assert!(LAUNCH_CARD_Y + LAUNCH_CARD_H < HOTKEY_CARD_Y);
         assert!(HOTKEY_LIST_Y + HOTKEY_WORD_LIST_H <= HOTKEY_CARD_Y + HOTKEY_CARD_H);
