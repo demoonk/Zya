@@ -16,7 +16,7 @@ use windows::Win32::UI::Controls::{EM_GETSEL, EM_SETSEL};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
     KEYBDINPUT, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE,
-    MOUSEINPUT, VK_PAUSE, VK_A, VK_B, VK_C, VK_D, VK_E,
+    MOUSEINPUT, VK_PAUSE, VK_A, VK_B, VK_C, VK_D, VK_E, VK_O, VK_T, VK_Z,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetWindowRect, GetWindowTextLengthW,
@@ -306,6 +306,50 @@ fn main() {
         pump(2500);
         println!("7) Break with a real selection {:?} -> {:?}", before, text_of(edit));
         println!("7b) caret after {:?}", selection(edit));
+
+        // 8) the everyday gesture: double-click a word to select it, then Break.
+        for key in [VK_C, VK_O, VK_T, VK_Z] {
+            tap(key);
+        }
+        let mut rect = RECT::default();
+        GetWindowRect(edit, &mut rect).ok();
+        let ax = (rect.left + 95) as f64 / 2560.0 * 65535.0;
+        let ay = (rect.top + 20) as f64 / 1440.0 * 65535.0;
+        for _ in 0..2 {
+            send(&INPUT {
+                r#type: INPUT_MOUSE,
+                Anonymous: INPUT_0 {
+                    mi: MOUSEINPUT {
+                        dx: ax as i32,
+                        dy: ay as i32,
+                        mouseData: 0,
+                        dwFlags: MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_LEFTDOWN,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            });
+            pump(80);
+            send(&INPUT {
+                r#type: INPUT_MOUSE,
+                Anonymous: INPUT_0 {
+                    mi: MOUSEINPUT {
+                        dx: ax as i32,
+                        dy: ay as i32,
+                        mouseData: 0,
+                        dwFlags: MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_LEFTUP,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            });
+            pump(80);
+        }
+        let before = text_of(edit);
+        println!("8a) after the double click {:?} caret {:?}", before, selection(edit));
+        tap(VK_PAUSE);
+        pump(2500);
+        println!("8) Break on the double-clicked word {:?} -> {:?}", before, text_of(edit));
 
         SendMessageW(edit, EM_SETSEL, Some(WPARAM(0usize)), Some(LPARAM(0isize)));
         pump(100);
