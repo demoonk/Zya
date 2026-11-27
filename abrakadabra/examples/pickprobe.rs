@@ -58,9 +58,12 @@ fn main() {
         println!("probe: pidl {}", id as usize);
         if !id.is_null() {
             let mut path = [0u16; 260];
-            let ok =
-                SHGetPathFromIDListEx(id, &mut path, windows::Win32::UI::Shell::GPFIDL_FLAGS(0))
-                    .as_bool();
+            let ok = SHGetPathFromIDListEx(
+                id,
+                &mut path,
+                windows::Win32::UI::Shell::GPFIDL_FLAGS(0),
+            )
+            .as_bool();
             let text = String::from_utf16_lossy(&path);
             let end = text.find('\0').unwrap_or(text.len());
             println!("probe: ok {ok} path {}", &text[..end]);

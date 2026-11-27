@@ -1,4 +1,4 @@
-﻿//! User configuration, stored as JSON next to the diary.
+//! User configuration, stored as JSON next to the diary.
 //!
 //! L-05: a broken `config.json` is never silently replaced by defaults. The
 //! corrupt file is kept as `config.json.bad-<timestamp>`, every write keeps a
@@ -113,7 +113,6 @@ fn default_hotkey_invert_last() -> String {
 fn default_hotkey_add_word() -> String {
     "ctrl+`".into()
 }
-fn default_numpad_comma_as_dot() -> bool { true }
 fn default_true() -> bool {
     true
 }

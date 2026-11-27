@@ -9,8 +9,8 @@ use std::sync::{Mutex, OnceLock};
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{
-    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, ERROR_SHARING_VIOLATION, GENERIC_READ,
-    GENERIC_WRITE, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, WPARAM,
+    CloseHandle, GetLastError, GlobalFree, ERROR_ALREADY_EXISTS, ERROR_SHARING_VIOLATION,
+    GENERIC_READ, GENERIC_WRITE, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, WPARAM,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_NONE, OPEN_ALWAYS,
@@ -1270,9 +1270,34 @@ use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM
 /// CF_UNICODETEXT.
 const CF_UNICODE: u32 = 13;
 
+/// The clipboard is a single, lockable resource. Another process can hold it for
+/// a moment, and two of our own threads — a selection gesture on the side thread
+/// and a "Скопировать строку" click in the settings window — must never open it
+/// at the same time, otherwise one of them writes while the other is still
+/// reading. Every clipboard access in this module goes through this lock.
+fn clip_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Open the clipboard with retries: `OpenClipboard` fails while another process
+/// (a clipboard manager, a remote-desktop tool) is in the middle of a write, and
+/// a single attempt used to make the whole gesture silently fall back to the old
+/// contents.
+unsafe fn open_clipboard() -> bool {
+    for _ in 0..5 {
+        if OpenClipboard(None).is_ok() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    false
+}
+
 /// The Unicode clipboard contents, or None when there is no text.
 pub unsafe fn clipboard_text() -> Option<String> {
-    if OpenClipboard(None).is_err() {
+    let _guard = clip_lock().lock().unwrap_or_else(|e| e.into_inner());
+    if !open_clipboard() {
         return None;
     }
     let out = match GetClipboardData(CF_UNICODE) {
@@ -1298,27 +1323,70 @@ pub unsafe fn clipboard_text() -> Option<String> {
     out
 }
 
-unsafe fn set_clipboard(text: &str) {
+/// Put `text` into the clipboard. Returns true only when the write really
+/// landed: the caller needs to know, because a failed write used to leave the
+/// user's old contents in place and the gesture then pasted them.
+unsafe fn set_clipboard(text: &str) -> bool {
     let units: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-    if OpenClipboard(None).is_err() {
-        return;
-    }
-    let _ = EmptyClipboard();
-    if let Ok(handle) = GlobalAlloc(GMEM_MOVEABLE, units.len() * 2) {
-        let ptr = GlobalLock(handle) as *mut u16;
-        if !ptr.is_null() {
-            std::ptr::copy_nonoverlapping(units.as_ptr(), ptr, units.len());
-            GlobalUnlock(handle).ok();
-            // Ownership of the memory block moves to the clipboard.
-            SetClipboardData(CF_UNICODE, Some(HANDLE(handle.0))).ok();
+    let _guard = clip_lock().lock().unwrap_or_else(|e| e.into_inner());
+    for _ in 0..4 {
+        if OpenClipboard(None).is_ok() {
+            let _ = EmptyClipboard();
+            let mut written = false;
+            if let Ok(handle) = GlobalAlloc(GMEM_MOVEABLE, units.len() * 2) {
+                let ptr = GlobalLock(handle) as *mut u16;
+                if ptr.is_null() {
+                    // GlobalUnlock failed or the block was never lockable: nobody
+                    // else can use it, so free it here instead of leaking it.
+                    GlobalFree(Some(handle)).ok();
+                } else {
+                    std::ptr::copy_nonoverlapping(units.as_ptr(), ptr, units.len());
+                    GlobalUnlock(handle).ok();
+                    // On success ownership of the block moves to the clipboard.
+                    written = SetClipboardData(CF_UNICODE, Some(HANDLE(handle.0))).is_ok();
+                    if !written {
+                        GlobalFree(Some(handle)).ok();
+                    }
+                }
+            }
+            CloseClipboard().ok();
+            if written {
+                return true;
+            }
         }
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    CloseClipboard().ok();
+    false
+}
+
+/// Leave the clipboard empty instead of keeping our marker behind. Used when the
+/// user's clipboard had no text to begin with, so nothing useful can be
+/// restored.
+unsafe fn clear_clipboard() -> bool {
+    let _guard = clip_lock().lock().unwrap_or_else(|e| e.into_inner());
+    if open_clipboard() {
+        let cleared = EmptyClipboard().is_ok();
+        CloseClipboard().ok();
+        return cleared;
+    }
+    false
+}
+
+/// Empty the clipboard from another module (the Telegram probe), under the same
+/// lock the gestures use.
+pub fn clear_clipboard_text() -> bool {
+    unsafe { clear_clipboard() }
 }
 
 /// Clipboard text, exposed for tests and diagnostics.
 pub fn clipboard_snapshot() -> Option<String> {
     unsafe { clipboard_text() }
+}
+
+/// Write text into the clipboard from another module (the Telegram composer
+/// borrows the clipboard the same way a gesture does).
+pub fn set_clipboard_text(text: &str) -> bool {
+    unsafe { set_clipboard(text) }
 }
 
 unsafe fn send_combo(modifier: VIRTUAL_KEY, other: VIRTUAL_KEY) {
@@ -1427,25 +1495,31 @@ unsafe fn selection_action(op: SelOp) -> Option<(String, String)> {
     // A marker, not an empty clipboard: some applications keep the clipboard
     // locked, so EmptyClipboard can fail and Ctrl+C would then appear to have
     // copied the previous contents.
-    set_clipboard(CLIP_SENTINEL);
+    let marker_written = set_clipboard(CLIP_SENTINEL);
     send_combo(VK_LCONTROL, VK_C);
     let mut selection = None;
     for _ in 0..8 {
         std::thread::sleep(std::time::Duration::from_millis(50));
         if let Some(s) = clipboard_text() {
-            if !s.is_empty() && s != CLIP_SENTINEL {
-                selection = Some(s);
-                break;
+            if s.is_empty() || s == CLIP_SENTINEL {
+                continue;
             }
+            // The marker never landed (the clipboard was locked), so the only way
+            // to tell "the user copied a selection" from "nothing was copied" is
+            // that the contents changed. When they did not, Ctrl+C copied nothing,
+            // and pasting would drop the user's old clipboard over the selection.
+            if !marker_written && saved.as_ref() == Some(&s) {
+                continue;
+            }
+            selection = Some(s);
+            break;
         }
     }
     let Some(selection) = selection else {
         if verbose() {
             println!("selection {op:?}: nothing was copied (marker still in clipboard)");
         }
-        if let Some(s) = &saved {
-            set_clipboard(s);
-        }
+        restore_clipboard(&saved);
         return None;
     };
     let transformed = transform_selection(op, &selection);
@@ -1456,24 +1530,87 @@ unsafe fn selection_action(op: SelOp) -> Option<(String, String)> {
         );
     }
     if transformed != selection {
-        set_clipboard(&transformed);
-        send_combo(VK_LCONTROL, VK_V);
-        if op == SelOp::SwapLayout {
-            send_layout_flip();
+        if set_clipboard(&transformed) {
+            send_combo(VK_LCONTROL, VK_V);
+            if op == SelOp::SwapLayout {
+                send_layout_flip();
+            }
+            // The target application reads the clipboard when it processes
+            // WM_PASTE, which happens after SendInput returns. Restoring the
+            // user's clipboard immediately made it paste the *old* clipboard over
+            // the selection — the "Break inserts my clipboard instead of
+            // replacing the text" bug. The old fixed 250 ms sleep was a gamble on
+            // how fast the application handled the message; instead we keep the
+            // transformed text until the application has demonstrably looked at
+            // the clipboard (it changed), and in the worst case wait out the whole
+            // grace window before handing the user's contents back.
+            let deadline =
+                std::time::Instant::now() + std::time::Duration::from_millis(900);
+            while std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(60));
+                if clipboard_text().as_deref() != Some(transformed.as_str()) {
+                    break;
+                }
+            }
+        } else if verbose() {
+            println!("selection op {op:?}: clipboard is locked, paste skipped");
         }
-        // The target application reads the clipboard when it processes WM_PASTE,
-        // which happens after SendInput returns. Restoring the user's clipboard
-        // immediately made it paste the *old* clipboard over the selection —
-        // the "Break inserts my clipboard instead of replacing the text" bug.
-        std::thread::sleep(std::time::Duration::from_millis(250));
     }
-    if let Some(s) = &saved {
-        set_clipboard(s);
-    }
+    restore_clipboard(&saved);
     Some((selection, transformed))
 }
 
+/// Give the user's clipboard back. When there was no text to save, the marker
+/// must not stay behind: a later Ctrl+V somewhere else would insert
+/// "zya-no-selection".
+unsafe fn restore_clipboard(saved: &Option<String>) {
+    match saved {
+        Some(text) => {
+            if !set_clipboard(text) {
+                // The clipboard is locked by another program. We cannot put the
+                // user's text back, but leaving our marker behind is worse: their
+                // next Ctrl+V anywhere would insert "zya-no-selection".
+                if clipboard_text().as_deref() == Some(CLIP_SENTINEL) {
+                    clear_clipboard();
+                }
+            }
+        }
+        None => {
+            // Only wipe the clipboard when it holds our marker. A copied image or a
+            // list of files has no CF_UNICODETEXT, and EmptyClipboard would destroy
+            // formats the user still needs.
+            if clipboard_text().as_deref() == Some(CLIP_SENTINEL) {
+                clear_clipboard();
+            }
+        }
+    }
+}
+
 static GESTURE_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Ownership of the clipboard and of the keystroke stream while a gesture runs.
+/// Releasing happens in `Drop`, so an early return — or a panic unwinding the
+/// gesture thread — can never leave the flag set forever, which would make the
+/// hook pass every key through and silently stop the engine.
+pub struct ClipboardGesture {
+    _never_used: (),
+}
+
+impl ClipboardGesture {
+    pub fn try_acquire() -> Option<ClipboardGesture> {
+        if GESTURE_BUSY.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            None
+        } else {
+            Some(ClipboardGesture { _never_used: () })
+        }
+    }
+}
+
+impl Drop for ClipboardGesture {
+    fn drop(&mut self) {
+        GESTURE_BUSY.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
 
 /// What a manual gesture is bound to. The same combination can be bound to both
 /// kinds at once ("Break" by default): then the selection is tried first and the
@@ -1502,17 +1639,17 @@ fn scope_of(selection_bound: bool, word_bound: bool) -> Scope {
 /// two of them, and both deleted and retyped the same token — the visible
 /// "double switch". The second press is swallowed.
 fn spawn_selection(op: SelOp, lang: u32, scope: Scope) {
-    if GESTURE_BUSY.swap(true, std::sync::atomic::Ordering::Relaxed) {
+    let Some(guard) = ClipboardGesture::try_acquire() else {
         if verbose() {
             println!("gesture {op:?} still running; this Break is ignored");
         }
         return;
-    }
+    };
     std::thread::spawn(move || {
         unsafe {
             selection_gesture(op, lang, scope);
         }
-        GESTURE_BUSY.store(false, std::sync::atomic::Ordering::Relaxed);
+        drop(guard);
     });
 }
 
@@ -2353,6 +2490,18 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     // state, so normalise letter case from the modifiers we tracked ourselves.
     if a.mods.shift() && c.is_alphabetic() {
         c = c.to_uppercase().next().unwrap_or(c);
+    }
+
+    // L-31: while a selection gesture is still running its Ctrl+C / Ctrl+V
+    // dance, the automatic layer keeps out of the way. Its backspace batch and
+    // the gesture's paste otherwise interleave in the target application's
+    // message queue, and the application pastes whatever the clipboard held at
+    // that instant — the "engine pasted my clipboard" report.
+    if GESTURE_BUSY.load(std::sync::atomic::Ordering::Relaxed) {
+        if verbose() {
+            defer(Deferred::Note(format!("key {c:?} passed through: gesture in flight")));
+        }
+        return CallNextHookEx(None, code, wparam, lparam);
     }
 
     // Requested word-end triggers: `? & / ^` behave like a space and flush the
@@ -3302,5 +3451,48 @@ mod tests {
         assert!(looks_like_identifier("http://site"));
         assert!(looks_like_identifier("c4"));
         assert!(!looks_like_identifier("ghbdtn"));
+    }
+
+    #[test]
+    fn the_clipboard_round_trip_restores_what_the_user_had() {
+        unsafe {
+            let original = clipboard_snapshot();
+            // A gesture writes its sentinel, then the transformed text, then
+            // restores. Every step has to be observable, or the paste silently
+            // sends the user's old contents back.
+            assert!(set_clipboard_text(CLIP_SENTINEL));
+            assert_eq!(clipboard_text().as_deref(), Some(CLIP_SENTINEL));
+            assert!(set_clipboard_text("исправленное слово"));
+            assert_eq!(clipboard_text().as_deref(), Some("исправленное слово"));
+            restore_clipboard(&original);
+            assert_eq!(clipboard_snapshot(), original);
+        }
+    }
+
+    #[test]
+    fn a_failed_clipboard_write_is_reported() {
+        unsafe {
+            // The clipboard can be locked by another process; the helper must not
+            // claim success in that case, because the caller skips the paste.
+            let ok = set_clipboard_text("проверка");
+            if ok {
+                assert_eq!(clipboard_text().as_deref(), Some("проверка"));
+            }
+        }
+    }
+
+    #[test]
+    fn only_one_gesture_owns_the_clipboard_at_a_time() {
+        let held = ClipboardGesture::try_acquire();
+        assert!(held.is_some(), "the first gesture must get the clipboard");
+        assert!(
+            ClipboardGesture::try_acquire().is_none(),
+            "a second gesture must not start while the first is running"
+        );
+        drop(held);
+        assert!(
+            ClipboardGesture::try_acquire().is_some(),
+            "the latch must release when the guard is dropped"
+        );
     }
 }

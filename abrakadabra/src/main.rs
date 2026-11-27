@@ -99,6 +99,8 @@ fn usage() {
           z.exe tabshot <вкладка> <файл.bmp>\n\
                                     снимок вкладки settings|ignore|log для проверки\n\
            z.exe deletetest         проверить кнопку «Удалить» в списке игнорирования\n\
+            z.exe windows            список окон для кнопки «Добавить активное приложение»\n\
+            z.exe deletetest multi   удалить сразу несколько выбранных строк\n\
             z.exe hotkeytest         проверить окно назначения горячей клавиши\n\
            z.exe stalltest          проверка стража: окно закрывается, если цикл\n\
                                    сообщений перестал работать (перехват клавиш\n\
@@ -520,6 +522,18 @@ fn main() -> anyhow::Result<()> {
         let _ = join_window(window, 15_000);
         return Ok(());
     }
+    if cmd == "windows" {
+        // `zя windows` — what the "Добавить активное приложение" menu can offer.
+        let list = settings_ui::active_windows();
+        if list.is_empty() {
+            println!("zя: открытых окон не найдено");
+        } else {
+            for (title, process) in list {
+                println!("zя: {process} — {title}");
+            }
+        }
+        return Ok(());
+    }
     if cmd == "deletetest" {
         // `zя deletetest` — does "Удалить" really remove a row? Open the settings
         // window, click the top row of the ignore list, run the same code the
@@ -547,25 +561,30 @@ fn main() -> anyhow::Result<()> {
                 // and 1 are exactly the ones the old lookup could not see.
                 let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(101), LPARAM(0));
                 std::thread::sleep(std::time::Duration::from_millis(600));
-                let removed = crate::settings_ui::delete_top_ignore_row();
+                let multi = args.get(1).map(|value| value == "multi").unwrap_or(false);
+                let removed: Vec<String> = if multi {
+                    crate::settings_ui::select_and_delete_ignore_rows(3)
+                } else {
+                    crate::settings_ui::delete_top_ignore_row().into_iter().collect()
+                };
                 std::thread::sleep(std::time::Duration::from_millis(400));
                 // Config writes are queued on a worker thread; wait for the queue
                 // to drain before comparing the file on disk.
                 settings_ui::flush_config_saves(3000);
                 let after = crate::config::load();
                 let count = after.exclude_processes.len() + after.exclude_dirs.len();
-                match removed {
-                    Some(name) => {
+                if removed.is_empty() {
+                    println!("zя: удаление не сработало: строки не найдены");
+                } else {
+                    for name in &removed {
                         let gone = !after
                             .exclude_processes
                             .iter()
                             .chain(after.exclude_dirs.iter())
-                            .any(|item| item.eq_ignore_ascii_case(&name));
-                        println!(
-                            "zя: «{name}» убрана, записей {before} -> {count}, в файле её нет: {gone}"
-                        );
+                            .any(|item| item.eq_ignore_ascii_case(name));
+                        println!("zя: «{name}» убрана из config.json: {gone}");
                     }
-                    None => println!("zя: удаление не сработало: строка не найдена"),
+                    println!("zя: записей {before} -> {count}");
                 }
                 tg::capture_window(hwnd, "data/after_delete.bmp")?;
                 let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));

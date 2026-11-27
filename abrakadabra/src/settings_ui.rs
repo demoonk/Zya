@@ -20,22 +20,20 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use windows::core::{PCWSTR, PWSTR};
+use windows::core::{BOOL, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
-    CloseHandle, COLORREF, GlobalFree, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+    CloseHandle, COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
     BACKGROUND_MODE, CLIP_DEFAULT_PRECIS, BeginPaint, CreateFontW, CreatePen,
-    CreateSolidBrush, ANTIALIASED_QUALITY, DEFAULT_CHARSET, DeleteObject, DrawTextW, EndPaint,
+    CreateSolidBrush, CLEARTYPE_NATURAL_QUALITY, DEFAULT_CHARSET, DeleteObject, DrawTextW, EndPaint,
+    FONT_QUALITY,
     FillRect, FF_MODERN, GetDC, GetMonitorInfoW, GetTextExtentPoint32W, HGDIOBJ, HDC, LineTo,
     MonitorFromPoint, MONITOR_DEFAULTTONEAREST, MONITORINFO, MoveToEx, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
     PS_SOLID, ReleaseDC, ClientToScreen, ScreenToClient, SelectObject, SetBkColor, SetBkMode,
     SetTextColor, TRANSPARENT, RoundRect,
 };
-use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
-use windows::Win32::System::Ole::CF_UNICODETEXT;
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
 };
@@ -45,15 +43,18 @@ use windows::Win32::UI::Controls::{
     LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETBKCOLOR, LVM_SETCOLUMNWIDTH, LVS_EX_FULLROWSELECT, LVS_REPORT,
     ODS_SELECTED, ODT_LISTVIEW, SetWindowTheme,
 };
+use windows::Win32::UI::Controls::Dialogs::{
+    GetOpenFileNameW, OFN_EXPLORER, OFN_NOVALIDATE, OPENFILENAMEW,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     VIRTUAL_KEY, VK_ESCAPE, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_RCONTROL, VK_RMENU, VK_RSHIFT,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CallNextHookEx, CallWindowProcW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW,
-    DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, GetClassNameW, GetClientRect,
-    GetCursorPos, GetWindowLongPtrW, GetWindowRect, GetMessageW, GetWindow, GetWindowTextW, GWL_ID,
-    GWL_WNDPROC, GW_CHILD, GW_HWNDNEXT, GW_HWNDPREV, HHOOK,
+    DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, EnumWindows, GetClassNameW,
+    GetClientRect, GetCursorPos, GetWindowLongPtrW, GetWindowRect, GetMessageW, GetWindow,
+    GetWindowTextW, GWL_ID, GWL_WNDPROC, GW_CHILD, GW_HWNDNEXT, GW_HWNDPREV, HHOOK,
     CreateIconFromResourceEx, HICON, IMAGE_FLAGS,
     HMENU, IDC_ARROW, HWND_TOP,
     KBDLLHOOKSTRUCT, KBDLLHOOKSTRUCT_FLAGS, LLKHF_UP, MF_ENABLED, MSG, MoveWindow, PostMessageW, RegisterClassExW, SendMessageW,
@@ -65,7 +66,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_ERASEBKGND, WM_PAINT, WM_KEYDOWN, WM_MOUSEMOVE, WM_SETICON, WM_SETFONT, WM_QUIT, WM_TIMER, WM_CLOSE,
     WINDOW_EX_STYLE, WINDOW_STYLE,
     WS_CHILD, WS_POPUP, WS_VISIBLE, CreatePopupMenu,
-    GetForegroundWindow, GetWindowThreadProcessId, IsWindow, IsWindowVisible, SPI_GETWORKAREA,
+    GetWindowThreadProcessId, IsWindow, IsWindowVisible, SPI_GETWORKAREA,
     SetForegroundWindow,
     SystemParametersInfoW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
 };
@@ -205,7 +206,7 @@ const FILTER_W: i32 = 180;
 const FILTER_LABEL_W: i32 = 84;
 const ROW_GAP: i32 = 10;
 
-const CONTROLS: [ControlSpec; 21] = [
+const CONTROLS: [ControlSpec; 20] = [
     ControlSpec { role: BTN_CONFIG, label: "Открыть файл конфигурации", x: 0, y: HEADER_TOP, width: 280, height: 34, max_width: 320, anchored_right: true },
     ControlSpec { role: BTN_UPDATE, label: "Проверить обновления", x: 0, y: 112, width: 200, height: 40, max_width: 260, anchored_right: true },
     ControlSpec { role: CB_AUTOSTART, label: "Автозапуск при входе", x: INNER_LEFT, y: CB_AUTOSTART_Y, width: 430, height: 38, max_width: 440, anchored_right: false },
@@ -214,10 +215,9 @@ const CONTROLS: [ControlSpec; 21] = [
     ControlSpec { role: CB_NUMPAD_DOT, label: "······ «.» · «.» · ······· ······", x: SMART_COL_X, y: CB_NUMPAD_DOT_Y, width: SMART_COL_W, height: 34, max_width: 416, anchored_right: false },
     ControlSpec { role: CB_SMART_UNDO, label: "Умная отмена", x: SMART_COL_X, y: CB_SMART_Y, width: SMART_COL_W, height: SMART_BLOCK_H, max_width: 416, anchored_right: false },
     ControlSpec { role: BTN_HOTKEY_RESET, label: "Сбросить", x: 0, y: HOTKEY_CARD_Y + 14, width: 120, height: 32, max_width: 160, anchored_right: true },
-    ControlSpec { role: BTN_ADD_PROCESSES, label: "Добавить активное приложение", x: INNER_LEFT, y: 128, width: IGNORE_SLOT, height: 40, max_width: 0, anchored_right: false },
-    ControlSpec { role: BTN_ADD_PROCESS, label: "Добавить новый процесс", x: INNER_LEFT + IGNORE_SLOT + 16, y: 128, width: IGNORE_SLOT, height: 40, max_width: 0, anchored_right: false },
-    ControlSpec { role: BTN_REMOVE_IGNORE, label: "Удалить выбранное", x: INNER_LEFT + 2 * (IGNORE_SLOT + 16), y: 128, width: IGNORE_SLOT, height: 40, max_width: 0, anchored_right: false },
-    ControlSpec { role: IGNORE_INPUT, label: "", x: INNER_LEFT, y: 178, width: INNER_RIGHT - INNER_LEFT - 132, height: 34, max_width: 0, anchored_right: false },
+    ControlSpec { role: BTN_ADD_PROCESSES, label: "Добавить активное приложение", x: INNER_LEFT, y: 128, width: 2 * IGNORE_SLOT + 16, height: 40, max_width: 0, anchored_right: false },
+    ControlSpec { role: BTN_DISK, label: "Указать на диске", x: INNER_LEFT + 2 * IGNORE_SLOT + 32, y: 128, width: IGNORE_SLOT, height: 40, max_width: 0, anchored_right: false },
+    ControlSpec { role: IGNORE_INPUT, label: "", x: INNER_LEFT + 88, y: 178, width: INNER_RIGHT - INNER_LEFT - 88 - 12 - 120 - 12, height: 34, max_width: 0, anchored_right: false },
     ControlSpec { role: BTN_ADD_COMMIT, label: "Добавить", x: 0, y: 178, width: 120, height: 34, max_width: 0, anchored_right: true },
     ControlSpec { role: IGNORE_FILTER, label: "", x: 0, y: 266, width: FILTER_W, height: 32, max_width: 0, anchored_right: true },
     ControlSpec { role: BTN_LOG_CLEAR, label: "Очистить", x: INNER_LEFT, y: 132, width: 120, height: 32, max_width: 0, anchored_right: false },
@@ -256,14 +256,14 @@ const CB_SMART_UNDO: usize = 125;
 const CB_NUMPAD_DOT: usize = 126;
 
 const BTN_ADD_PROCESSES: usize = 130;
-const BTN_ADD_PROCESS: usize = 131;
-const BTN_REMOVE_IGNORE: usize = 132;
 const IGNORE_INPUT: usize = 133;
 const BTN_ADD_COMMIT: usize = 134;
 const IGNORE_FILTER: usize = 135;
 const IGNORE_LIST: usize = 136;
 const IGNORE_FILTER_LABEL: usize = 137;
 const CB_AUTO_LAYOUT: usize = 138;
+const BTN_DISK: usize = 139;
+const IGNORE_ADD_LABEL: usize = 153;
 const LOG_FILTER_LABEL: usize = 144;
 
 const BTN_LOG_REFRESH: usize = 140;
@@ -287,6 +287,9 @@ const HOTKEY_ASSIGN: usize = 161;
 const HOTKEY_ESCAPED: usize = 162;
 // WM_TIMER id of the one-second heartbeat the watchdog watches.
 const HEARTBEAT_TIMER: usize = 1;
+// WM_TIMER id of the log refresh: the diary grows while the user types, and the
+// "Лог" page has to show new lines without another click on "Обновить".
+const LOG_TIMER: usize = 2;
 // A stalled UI thread would stall the low-level keyboard hook too, since the
 // hook runs on the same thread. The watchdog reacts after this many seconds
 // without a heartbeat.
@@ -757,7 +760,12 @@ fn make_font(height: i32, weight: i32) -> windows::Win32::Graphics::Gdi::HFONT {
             DEFAULT_CHARSET,
             OUT_DEFAULT_PRECIS,
             CLIP_DEFAULT_PRECIS,
-            ANTIALIASED_QUALITY,
+            // ANTIALIASED_QUALITY is GDI's old grayscale smoothing. It ignores the
+            // system's ClearType metrics and pads wide glyphs, which is why the
+            // letter "m" (and other wide lowercase letters) looked like it had an
+            // extra space after it. Natural ClearType quality renders the font with
+            // the advances the font designer set.
+            FONT_QUALITY(CLEARTYPE_NATURAL_QUALITY as u8),
             FF_MODERN.0 as u32,
             PCWSTR(name.as_ptr()),
         )
@@ -1501,6 +1509,18 @@ unsafe fn make_field(
     role: usize,
     placeholder: &str,
 ) -> HWND {
+    // The paint pass draws the rounded frame two design pixels *outside* the box
+    // recorded for the role, so the Edit control is inset inside it. An Edit
+    // control paints its text at the top of its client area: a 34 px field with a
+    // 13 px line left the caret glued to the top edge and the first character
+    // touching the border — the "кривой курсор" in every input field. One line
+    // tall, centred in the box and inset eight design pixels from the frame, the
+    // caret sits exactly where the text does.
+    let pad = 8;
+    let line = -pt(10, dpi) + 3;
+    let left = s(x + pad, dpi);
+    let top = s(y, dpi) + (s(height, dpi) - line) / 2;
+    let inner_width = s(width - 2 * pad, dpi).max(line);
     let hwnd = CreateWindowExW(
         WINDOW_EX_STYLE(0),
         PCWSTR(wide("Edit").as_ptr()),
@@ -1508,10 +1528,10 @@ unsafe fn make_field(
         // No WS_BORDER: the system frame would paint a hard black rectangle on
         // a dark card. The rounded outline is drawn by the paint pass instead.
         WS_CHILD | WS_VISIBLE | WS_TABSTOP_STYLE,
-        s(x, dpi),
-        s(y, dpi),
-        s(width, dpi),
-        s(height, dpi),
+        left,
+        top,
+        inner_width,
+        line,
         Some(parent),
         Some(child_id(role)),
         None,
@@ -1914,14 +1934,11 @@ unsafe fn create_controls(parent: HWND, dpi: u32) {
             );
         }
     }
-    // The exception input is empty until the user opens it, so its button pair
-    // stays hidden.
-    if let Some(input) = handle(IGNORE_INPUT) {
-        let _ = ShowWindow(input, SW_HIDE);
-    }
-    if let Some(commit) = handle(BTN_ADD_COMMIT) {
-        let _ = ShowWindow(commit, SW_HIDE);
-    }
+    // The exception line is a permanent part of the page: the caption
+    // "Добавить", the field, the "Добавить" button and "Указать на диске", which
+    // fills the field from a folder or an .exe chosen in the file dialog.
+    let add_label = make_static_label(parent, dpi, "Добавить", INNER_LEFT, 178);
+    register_control(IGNORE_ADD_LABEL, add_label);
     // Two tables: the gestures that work on the last token, and the gestures
     // that need a selection. They are separate controls so each column keeps its
     // own row rects and its own assignment panel.
@@ -1958,7 +1975,7 @@ unsafe fn create_controls(parent: HWND, dpi: u32) {
     let log_label = make_static_label(parent, dpi, "Фильтр", INNER_RIGHT - FILTER_W - ROW_GAP - FILTER_LABEL_W, 100);
     register_control(LOG_FILTER_LABEL, log_label);
     let log_list = make_list(parent, dpi, INNER_LEFT, 174, INNER_RIGHT - INNER_LEFT, 520, LOG_LIST);
-    fill_log_list(log_list);
+    fill_log_list(log_list, true);
 
     // 4. Lexicon: the word table shares the geometry of the exception list.
     let lex_label = make_static_label(parent, dpi, "Фильтр", INNER_RIGHT - FILTER_W - ROW_GAP - FILTER_LABEL_W, 266);
@@ -2017,8 +2034,10 @@ fn visibility_groups() -> [(usize, &'static [usize]); 4] {
             1,
             &[
                 BTN_ADD_PROCESSES,
-                BTN_ADD_PROCESS,
-                BTN_REMOVE_IGNORE,
+                BTN_DISK,
+                IGNORE_ADD_LABEL,
+                IGNORE_INPUT,
+                BTN_ADD_COMMIT,
                 IGNORE_FILTER,
                 IGNORE_FILTER_LABEL,
                 IGNORE_LIST,
@@ -2052,12 +2071,6 @@ unsafe fn apply_tab_visibility() {
             }
         }
     }
-    // The "add process" line is only opened on demand.
-    for role in [IGNORE_INPUT, BTN_ADD_COMMIT] {
-        if let Some(hwnd) = handle(role) {
-            let _ = ShowWindow(hwnd, SW_HIDE);
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2086,9 +2099,19 @@ unsafe extern "system" fn settings_proc(
                 SetTimer(Some(hwnd), HEARTBEAT_TIMER, 1000, None),
                 Ordering::Relaxed,
             );
+            let _ = SetTimer(Some(hwnd), LOG_TIMER, 2000, None);
             return LRESULT(0);
         }
         WM_TIMER => {
+            // Only the heartbeat proves the loop is alive. Counting the log-refresh
+            // tick as a beat would make the stall watchdog believe the window is
+            // busy even when no messages arrive at all.
+            if wparam.0 as usize == LOG_TIMER {
+                if current_tab() == 2 {
+                    refresh_log_if_new();
+                }
+                return LRESULT(0);
+            }
             UI_BEAT.fetch_add(1, Ordering::Relaxed);
             return LRESULT(0);
         }
@@ -2142,14 +2165,13 @@ unsafe extern "system" fn settings_proc(
                 CB_ADMIN => toggle_admin_autostart(),
                 CB_AUTO_LAYOUT => toggle_auto_layout(),
                 CB_SMART_UNDO => toggle_smart_undo(),
-    CB_NUMPAD_DOT => toggle_numpad_dot(),
+                CB_NUMPAD_DOT => toggle_numpad_dot(),
                 BTN_HOTKEY_RESET => reset_hotkeys(),
-                BTN_ADD_PROCESSES => add_foreground_process(),
-                BTN_ADD_PROCESS => show_ignore_input(),
+                BTN_ADD_PROCESSES => add_from_window_menu(),
                 BTN_ADD_COMMIT => add_ignore_entry(),
-                BTN_REMOVE_IGNORE => remove_ignore_row(list_selected(IGNORE_LIST)),
+                BTN_DISK => add_from_disk(),
                 BTN_LEX_ADD => add_lex_entry(),
-                BTN_LEX_REMOVE => remove_lex_row(list_selected(LEX_LIST)),
+                BTN_LEX_REMOVE => remove_lex_rows(&selected_rows(LEX_LIST)),
                 BTN_LOG_REFRESH => refresh_log(),
                 BTN_LOG_CLEAR => clear_log(),
                 MODAL_CANCEL => close_modal(),
@@ -2190,7 +2212,7 @@ unsafe extern "system" fn settings_proc(
                         } else if id == LOG_FILTER && filter_changed(id) {
                             bump_rows();
                             if let Some(list) = handle(LOG_LIST) {
-                                fill_log_list(list);
+                                fill_log_list(list, true);
                                 invalidate(list);
                             }
                         }
@@ -2236,8 +2258,14 @@ unsafe extern "system" fn settings_proc(
                 let _ = AppendMenuW(menu, MF_ENABLED, 1, PCWSTR(wide("Скопировать строку").as_ptr()));
                 let _ = AppendMenuW(menu, MF_ENABLED, 2, PCWSTR(wide("Скопировать весь список").as_ptr()));
                 if role == IGNORE_LIST || role == LEX_LIST {
-                    let label = if role == LEX_LIST { "Удалить слово" } else { "Удалить" };
-                    let _ = AppendMenuW(menu, MF_ENABLED, 3, PCWSTR(wide(label).as_ptr()));
+                    // "Удалить" sounded like one row; the menu now deletes every
+                    // row the user marked, and the caption says so.
+                    let _ = AppendMenuW(
+                        menu,
+                        MF_ENABLED,
+                        3,
+                        PCWSTR(wide("Удалить выбранное").as_ptr()),
+                    );
                 }
                 let chosen = TrackPopupMenu(
                     menu,
@@ -2256,10 +2284,18 @@ unsafe extern "system" fn settings_proc(
                     1 => copy_row(role, target),
                     2 => copy_visible_rows(role),
                     3 => {
+                        // Everything marked with Ctrl/Shift. If nothing is marked,
+                        // the row the menu was opened over is the target.
+                        let mut rows = selected_rows(role);
+                        if rows.is_empty() {
+                            if let Some(row) = target {
+                                rows.push(row);
+                            }
+                        }
                         if role == LEX_LIST {
-                            remove_lex_row(target);
+                            remove_lex_rows(&rows);
                         } else {
-                            remove_ignore_row(target);
+                            remove_ignore_rows(&rows);
                         }
                     }
                     _ => {}
@@ -2269,6 +2305,7 @@ unsafe extern "system" fn settings_proc(
         }
         WM_DESTROY => {
             KillTimer(Some(hwnd), HEARTBEAT_TIMER).ok();
+            KillTimer(Some(hwnd), LOG_TIMER).ok();
             // L-01: a modal is a child window, so Windows destroys it together
             // with the parent, but MODAL_TARGET would stay pointing at a row and
             // the global keyboard hook would then refuse every key for the rest
@@ -2981,8 +3018,7 @@ fn label_of(role: usize) -> String {
     CB_NUMPAD_DOT => "Numpad «.» -> «.» в русской раскладке".into(),
         BTN_HOTKEY_RESET => "Сбросить".into(),
         BTN_ADD_PROCESSES => "Добавить активное приложение".into(),
-        BTN_ADD_PROCESS => "Добавить новый процесс".into(),
-        BTN_REMOVE_IGNORE => "Удалить выбранное".into(),
+        BTN_DISK => "Указать на диске".into(),
         BTN_ADD_COMMIT => "Добавить".into(),
         BTN_LOG_REFRESH => "Обновить".into(),
         BTN_LOG_CLEAR => "Очистить".into(),
@@ -3087,6 +3123,19 @@ fn build_hotkey_rows(role: usize) -> Vec<DrawRow> {
         .collect()
 }
 
+/// Alphabetical order for the two long tables. The config keeps its own
+/// insertion order (the engine reads it as-is), but what the user sees is sorted
+/// by name, case-insensitively, so a 53-row exception list can actually be
+/// scanned.
+fn sort_rows_by_name(rows: &mut Vec<DrawRow>) {
+    rows.sort_by(|a, b| {
+        a.first
+            .to_lowercase()
+            .cmp(&b.first.to_lowercase())
+            .then_with(|| a.second.cmp(&b.second))
+    });
+}
+
 fn build_ignore_rows() -> Vec<DrawRow> {
     let config = get_cfg();
     let filter = field_text(IGNORE_FILTER);
@@ -3115,6 +3164,7 @@ fn build_ignore_rows() -> Vec<DrawRow> {
             });
         }
     }
+    sort_rows_by_name(&mut rows);
     rows
 }
 
@@ -3154,6 +3204,7 @@ fn build_lex_rows() -> Vec<DrawRow> {
             raw: word,
         });
     }
+    sort_rows_by_name(&mut rows);
     rows
 }
 
@@ -3390,27 +3441,67 @@ fn kind_of(reason: &str) -> String {
     }
 }
 
-unsafe fn fill_log_list(list: HWND) {
+unsafe fn fill_log_list(list: HWND, announce: bool) {
     let rows = cached_rows(LOG_LIST);
     send(list, LVM_DELETEALLITEMS, 0, 0);
     for (index, row) in rows.iter().enumerate() {
         insert_row(list, index, &row.raw);
     }
-    update_status(&format!("Строк в логе: {}", rows.len()));
+    // The automatic refresh runs every two seconds; announcing it in the status
+    // line would erase whatever the user just did ("Добавлено: ...").
+    if announce {
+        update_status(&format!("Строк в логе: {}", rows.len()));
+    }
 }
 
 unsafe fn refresh_log() {
     if let Some(list) = handle(LOG_LIST) {
-        fill_log_list(list);
+        fill_log_list(list, false);
         invalidate(list);
     }
 }
 
-unsafe fn clear_log() {
+// Size of diario.log as the log page last saw it. -1 means "never read".
+static LOG_SIZE: AtomicI64 = AtomicI64::new(-1);
+
+/// The diary grows while the engine switches layouts. The log page used to show
+/// only what it read when the window opened, so the user had to press "Обновить"
+/// to see a new line and read that as "лог не ведётся". A two-second heartbeat
+/// compares the file size and refreshes the table when it changed.
+unsafe fn refresh_log_if_new() {
     let path = crate::config::config_dir().join("diario.log");
-    std::fs::write(path, "").ok();
+    let size = std::fs::metadata(&path)
+        .map(|metadata| metadata.len() as i64)
+        .unwrap_or(0);
+    if LOG_SIZE.swap(size, Ordering::Relaxed) != size {
+        refresh_log();
+    }
+}
+
+unsafe fn clear_log() {
+    let dir = crate::config::config_dir();
+    let path = dir.join("diario.log");
+    if std::fs::write(&path, "").is_err() {
+        update_status("Не удалось очистить журнал: файл занят другим процессом");
+        return;
+    }
+    // The rotated half of the diary lives next to it; "Очистить" has to remove
+    // that too, otherwise the user sees the old lines come back on the next
+    // refresh.
+    let archive = dir.join("diario.log.1");
+    if std::fs::metadata(&archive).is_ok() {
+        std::fs::write(&archive, "").ok();
+    }
     crate::diary::clear_recent();
+    // The row cache is keyed by the config version. Without a bump the cached
+    // rows are handed back to the list and the page looks untouched after the
+    // clear — the "Очистить не работает" report.
+    bump_rows();
+    LOG_SIZE.store(0, Ordering::Relaxed);
     refresh_log();
+    if let Some(main) = main_window() {
+        repaint(main);
+    }
     update_status("Журнал очищен");
 }
 
@@ -3431,14 +3522,32 @@ unsafe fn list_selected(role: usize) -> Option<usize> {
     // LVM_GETNEXTITEM wants the starting index in wParam and the state flags in
     // lParam. The two were swapped, so only rows from index 2 on were ever found
     // and "Удалить" answered "Сначала выберите строку в списке".
-    let index = send(list, LVM_GETNEXTITEM, -1isize as usize, LVNI_SELECTED as isize).0;
-    // No selection is not "the first row": returning Some(0) here made
-    // "Удалить выбранное" delete an arbitrary entry the user never picked.
+    // The answer is a signed int: -1 means "nothing selected". Reading it straight
+    // into usize turns -1 into usize::MAX, which is a row index that does not exist.
+    let index = send(list, LVM_GETNEXTITEM, -1isize as usize, LVNI_SELECTED as isize).0 as isize;
     if index >= 0 {
         Some(index as usize)
     } else {
         None
     }
+}
+
+/// Every row the user marked with Ctrl/Shift. `list_selected` returns only the
+/// first one, which is why a multi-select delete removed a single row.
+unsafe fn selected_rows(role: usize) -> Vec<usize> {
+    let Some(list) = handle(role) else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    // Signed walk: LVM_GETNEXTITEM answers -1 when there is no next selected row,
+    // and passing that back as WPARAM (-1) makes the list view start over, which
+    // turned a three-row selection into a 200-row loop.
+    let mut index = send(list, LVM_GETNEXTITEM, -1isize as usize, LVNI_SELECTED as isize).0 as isize;
+    while index >= 0 && rows.len() < 200 {
+        rows.push(index as usize);
+        index = send(list, LVM_GETNEXTITEM, index as usize, LVNI_SELECTED as isize).0 as isize;
+    }
+    rows
 }
 
 // The row the pointer really landed on. A right click on an owner-drawn row does
@@ -3628,16 +3737,10 @@ unsafe fn add_to_config(value: &str) -> bool {
     true
 }
 
-// The name (basename, lower case) of the process that owns the window currently
-// in focus. `PROCESS_QUERY_LIMITED_INFORMATION` is enough for
-// QueryFullProcessImageNameW, so this works without elevation.
-unsafe fn foreground_process_name() -> Option<String> {
-    let window = GetForegroundWindow();
-    if is_null(window) {
-        return None;
-    }
-    let mut pid = 0u32;
-    GetWindowThreadProcessId(window, Some(&mut pid));
+// The name (basename, lower case) of the process behind a window.
+// `PROCESS_QUERY_LIMITED_INFORMATION` is enough for QueryFullProcessImageNameW,
+// so this works without elevation.
+unsafe fn process_name_of(pid: u32) -> Option<String> {
     if pid == 0 {
         return None;
     }
@@ -3665,25 +3768,131 @@ unsafe fn foreground_process_name() -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-// "Добавить из запущенных" used to dump the whole process snapshot into
-// exclude_processes, which switched the hook off everywhere. It now adds only
-// the application in the foreground window.
-unsafe fn add_foreground_process() {
-    let Some(name) = foreground_process_name() else {
-        update_status("Не удалось определить активное окно: сначала кликните по окну приложения");
+unsafe fn window_process_name(window: HWND) -> Option<String> {
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(window, Some(&mut pid));
+    process_name_of(pid)
+}
+
+/// Every visible top-level window and the process that owns it. "Добавить
+/// активное приложение" used to take whatever window happened to be in focus,
+/// which added the wrong process as often as the right one: the button now lists
+/// the open windows and lets the user pick one.
+type WindowEntry = (String, String);
+
+unsafe extern "system" fn collect_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let list = unsafe { &mut *(lparam.0 as *mut Vec<WindowEntry>) };
+    if !IsWindowVisible(hwnd).as_bool() {
+        return BOOL(1);
+    }
+    let mut buffer = vec![0u16; 200];
+    let length = GetWindowTextW(hwnd, &mut buffer).max(0) as usize;
+    let title = String::from_utf16_lossy(&buffer[..length]).trim().to_string();
+    if title.is_empty() {
+        return BOOL(1);
+    }
+    let Some(name) = window_process_name(hwnd) else {
+        return BOOL(1);
+    };
+    // The shell is not an application the user wants to silence, and the engine
+    // must never add itself to its own exclusion list — comparing handles covers
+    // the debug binary, whose name is not zя.exe.
+    if name == "explorer.exe" || Some(hwnd) == main_window() {
+        return BOOL(1);
+    }
+    // The list stores processes, not windows: four Chrome windows mean one entry.
+    if list.iter().any(|(_, process)| process == &name) {
+        return BOOL(1);
+    }
+    let short: String = title.chars().take(60).collect();
+    list.push((short, name));
+    BOOL(1)
+}
+
+unsafe fn visible_windows() -> Vec<(String, String)> {
+    let mut list: Vec<(String, String)> = Vec::new();
+    let pointer = &mut list as *mut Vec<(String, String)> as *mut c_void;
+    EnumWindows(Some(collect_window), LPARAM(pointer as isize)).ok();
+    list.sort_by(|a, b| {
+        a.1.to_lowercase()
+            .cmp(&b.1.to_lowercase())
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    list
+}
+
+/// Diagnostic behind `zя windows`: exactly the list the "Добавить активное
+/// приложение" menu offers.
+pub fn active_windows() -> Vec<WindowEntry> {
+    unsafe { visible_windows() }
+}
+
+unsafe fn add_from_window_menu() {
+    let Some(main) = main_window() else {
         return;
     };
-    if !name.ends_with(".exe") {
-        update_status(&format!("Активное окно: {name} — не исполняемый файл"));
+    let windows = visible_windows();
+    if windows.is_empty() {
+        update_status("Нет открытых окон: откройте приложение и повторите");
         return;
     }
-    if name == "explorer.exe" || name == "zя.exe" || name == "z.exe" || name == "zya.exe" {
-        update_status(&format!("{name} не добавляется: это оболочка или сам ZЯ"));
+    // L-14: TrackPopupMenu blocks this thread until the user answers, and the
+    // keyboard hook lives on the same thread.
+    let modal_open = modal_handle().is_some();
+    if HOTKEY_HOOK.load(Ordering::Relaxed) != 0 {
+        detach_hotkey_hook();
+    }
+    let Ok(menu) = CreatePopupMenu() else {
+        if modal_open {
+            install_capture_hook();
+        }
+        return;
+    };
+    // The menu keeps the string pointers it is given, so the labels must outlive
+    // AppendMenuW: building each `wide(...)` inside the call would hand the menu a
+    // pointer to a Vec that is dropped on the next line.
+    let labels: Vec<Vec<u16>> = windows
+        .iter()
+        .take(50)
+        .map(|(title, name)| wide(&format!("{title} — {name}")))
+        .collect();
+    for (index, label) in labels.iter().enumerate() {
+        let _ = AppendMenuW(menu, MF_ENABLED, index + 1, PCWSTR(label.as_ptr()));
+    }
+    let mut point = POINT { x: 0, y: 0 };
+    GetCursorPos(&mut point).ok();
+    let chosen = TrackPopupMenu(
+        menu,
+        TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
+        point.x,
+        point.y,
+        Some(0),
+        main,
+        None,
+    );
+    DestroyMenu(menu).ok();
+    if modal_open {
+        install_capture_hook();
+    }
+    let index = chosen.0;
+    if index < 1 || index as usize > windows.len() {
+        update_status("Выбор окна отменён");
         return;
     }
-    if !add_to_config(&name) {
-        update_status(&format!("{name} уже в списке исключений"));
-        return;
+    let (title, name) = &windows[index as usize - 1];
+    let status = add_exception(name);
+    update_status(&format!("{status} (окно «{title}»)"));
+}
+
+/// The single place where an exception is written: config, engine, disk, list,
+/// header. Returns the message for the status line.
+unsafe fn add_exception(value: &str) -> String {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return "Нужен процесс вида chrome.exe или папка вида C:\\Soft".to_string();
+    }
+    if !add_to_config(&value) {
+        return format!("{value} уже в списке исключений");
     }
     crate::win::reload_hotkeys(&get_cfg());
     save_config();
@@ -3691,61 +3900,114 @@ unsafe fn add_foreground_process() {
         fill_ignore_list(list);
         invalidate(list);
     }
-    repaint_main();
-    update_status(&format!("Добавлено из активного окна: {name}"));
+    if let Some(main) = main_window() {
+        repaint(main);
+    }
+    format!("Добавлено: {value}")
 }
 
-unsafe fn show_ignore_input() {
+/// "Указать на диске": the standard file dialog. An .exe chosen in it becomes a
+/// process entry; a folder (typed in the name box, or the folder around any other
+/// file the user picked) becomes an excluded path.
+/// What the ignore list actually stores for a path the user chose on disk: an
+/// .exe becomes its process name, a folder stays a folder, and any other file
+/// becomes the folder that contains it.
+fn exception_value(path: &str) -> String {
+    if path.to_lowercase().ends_with(".exe") {
+        return path.rsplit('\\').next().unwrap_or(path).to_lowercase();
+    }
+    if std::fs::metadata(path).map(|entry| entry.is_dir()).unwrap_or(false) {
+        return path.to_string();
+    }
+    std::path::Path::new(path)
+        .parent()
+        .map(|parent| parent.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string())
+}
+
+unsafe fn add_from_disk() {
+    let Some(main) = main_window() else {
+        return;
+    };
+    let initial = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".to_string());
+    let mut name = [0u16; 512];
+    let filter: Vec<u16> = "Процессы (*.exe)\0*.exe\0Папки и файлы\0*.*\0\0"
+        .encode_utf16()
+        .collect();
+    let title = wide("Указать на диске: папка или процесс");
+    let initial_dir = wide(&initial);
+    let mut ofn = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: main,
+        lpstrFilter: PCWSTR(filter.as_ptr()),
+        lpstrFile: PWSTR(name.as_mut_ptr()),
+        nMaxFile: name.len() as u32,
+        lpstrTitle: PCWSTR(title.as_ptr()),
+        lpstrInitialDir: PCWSTR(initial_dir.as_ptr()),
+        Flags: OFN_EXPLORER | OFN_NOVALIDATE,
+        ..Default::default()
+    };
+    if !GetOpenFileNameW(&mut ofn).as_bool() {
+        update_status("Выбор отменён");
+        return;
+    }
+    let chars: Vec<u16> = name.iter().take_while(|character| **character != 0).copied().collect();
+    let chosen = String::from_utf16_lossy(&chars).trim().to_string();
+    if chosen.is_empty() {
+        update_status("Ничего не выбрано");
+        return;
+    }
+    let path = if chosen.contains('\\') || chosen.contains('/') {
+        chosen
+    } else {
+        format!("{}\\{}", initial, chosen)
+    };
+    let value = exception_value(&path);
     if let Some(input) = handle(IGNORE_INPUT) {
-        let _ = ShowWindow(input, SW_SHOW);
+        SetWindowTextW(input, PCWSTR(wide(&value).as_ptr())).ok();
     }
-    if let Some(commit) = handle(BTN_ADD_COMMIT) {
-        let _ = ShowWindow(commit, SW_SHOW);
-    }
-    repaint_main();
-    update_status("Введите процесс (.exe) или путь к папке, например C:\\Soft");
+    let status = add_exception(&value);
+    update_status(&status);
 }
 
 unsafe fn add_ignore_entry() {
     let value = field_text(IGNORE_INPUT);
-    if add_to_config(&value) {
-        crate::win::reload_hotkeys(&get_cfg());
-        save_config();
+    let status = add_exception(&value);
+    if !value.trim().is_empty() && !status.contains("уже в списке") {
         if let Some(input) = handle(IGNORE_INPUT) {
             SetWindowTextW(input, PCWSTR(std::ptr::null())).ok();
-            let _ = ShowWindow(input, SW_HIDE);
         }
-        if let Some(commit) = handle(BTN_ADD_COMMIT) {
-            let _ = ShowWindow(commit, SW_HIDE);
-        }
-        if let Some(list) = handle(IGNORE_LIST) {
-            fill_ignore_list(list);
-            invalidate(list);
-        }
-        if let Some(hwnd) = main_window() {
-            repaint(hwnd);
-        }
-        update_status(&format!("Добавлено: {}", value.trim()));
-    } else {
-        update_status("Нужен процесс вида chrome.exe или папка вида C:\\Soft");
     }
+    update_status(&status);
 }
 
 unsafe fn remove_ignore_row(index: Option<usize>) {
-    let Some(index) = index else {
+    match index {
+        Some(index) => remove_ignore_rows(&[index]),
+        None => update_status("Сначала выберите строку в списке"),
+    }
+}
+
+/// Delete every row the user marked. A single click used to delete one row; with
+/// Ctrl/Shift multi-selection the context menu "Удалить выбранное" now removes
+/// the whole selection in one pass, instead of only the first row it happened to
+/// find.
+unsafe fn remove_ignore_rows(indices: &[usize]) {
+    let names: Vec<String> = indices
+        .iter()
+        .filter_map(|&index| cached_row(IGNORE_LIST, index).map(|row| row.raw))
+        .collect();
+    if names.is_empty() {
         update_status("Сначала выберите строку в списке");
         return;
-    };
-    let Some(row) = cached_row(IGNORE_LIST, index) else {
-        update_status("Сначала выберите строку в списке");
-        return;
-    };
-    let name = row.raw.clone();
+    }
     {
         let reference = cfg();
         let mut guard = reference.lock().unwrap_or_else(|e| e.into_inner());
-        guard.exclude_processes.retain(|item| !item.eq_ignore_ascii_case(&name));
-        guard.exclude_dirs.retain(|item| !item.eq_ignore_ascii_case(&name));
+        for name in &names {
+            guard.exclude_processes.retain(|item| !item.eq_ignore_ascii_case(name));
+            guard.exclude_dirs.retain(|item| !item.eq_ignore_ascii_case(name));
+        }
     }
     bump_rows();
     crate::win::reload_hotkeys(&get_cfg());
@@ -3755,11 +4017,15 @@ unsafe fn remove_ignore_row(index: Option<usize>) {
         invalidate(list);
     }
     // The ignore card in the header prints the live entry count, so it has to be
-    // repainted too, otherwise the window still claims the deleted row exists.
+    // repainted too, otherwise the window still claims the deleted rows exist.
     if let Some(main) = main_window() {
         repaint(main);
     }
-    update_status(&format!("Удалено: {name}"));
+    if names.len() == 1 {
+        update_status(&format!("Удалено: {}", names[0]));
+    } else {
+        update_status(&format!("Удалено записей: {}", names.len()));
+    }
 }
 
 unsafe fn add_lex_entry() {
@@ -3780,23 +4046,35 @@ unsafe fn add_lex_entry() {
     update_status(&format!("Добавлено в словарь: {}", value));
 }
 
-unsafe fn remove_lex_row(index: Option<usize>) {
-    let Some(index) = index else {
+unsafe fn remove_lex_rows(indices: &[usize]) {
+    let words: Vec<String> = indices
+        .iter()
+        .filter_map(|&index| cached_row(LEX_LIST, index).map(|row| row.raw))
+        .collect();
+    if words.is_empty() {
         update_status("Сначала выберите строку в списке");
         return;
-    };
-    let Some(row) = cached_row(LEX_LIST, index) else {
-        update_status("Сначала выберите строку в списке");
-        return;
-    };
-    let word = row.raw.clone();
-    if !crate::win::remove_short_word(&word) {
-        update_status(&format!("«{word}» — встроенное слово: его нельзя убрать"));
+    }
+    let mut removed = 0;
+    let mut builtin = 0;
+    for word in &words {
+        if crate::win::remove_short_word(word) {
+            removed += 1;
+        } else {
+            builtin += 1;
+        }
+    }
+    if removed == 0 {
+        update_status("Встроенные слова нельзя убрать из словаря");
         return;
     }
     bump_rows();
     refresh_lex();
-    update_status(&format!("Удалено из словаря: {word}"));
+    if builtin > 0 {
+        update_status(&format!("Удалено слов: {removed} (встроенные остались)"));
+    } else {
+        update_status(&format!("Удалено из словаря: {removed}"));
+    }
 }
 
 // Diagnostic behind `zя deletetest`: post a real left-click on the top row of the
@@ -3821,6 +4099,40 @@ pub unsafe fn delete_top_ignore_row() -> Option<String> {
     let _ = PostMessageW(Some(list), WM_LBUTTON_UP, WPARAM(0), click);
     remove_ignore_row(list_selected(IGNORE_LIST));
     Some(name)
+}
+
+/// Diagnostic behind `zя deletetest multi`: mark the first `count` rows of the
+/// ignore list and run exactly the code the context menu's "Удалить выбранное"
+/// runs, so the multi-select path can be checked without a human clicking.
+pub unsafe fn select_and_delete_ignore_rows(count: usize) -> Vec<String> {
+    use windows::Win32::UI::Controls::{
+        LIST_VIEW_ITEM_STATE_FLAGS, LVIF_STATE, LVITEMW, LVM_GETITEMCOUNT, LVM_SETITEMSTATE,
+        LVNI_SELECTED,
+    };
+    let Some(list) = handle(IGNORE_LIST) else {
+        return Vec::new();
+    };
+    let total = send(list, LVM_GETITEMCOUNT, 0, 0).0.max(0) as usize;
+    for index in 0..count.min(total) {
+        // LVM_SETITEMSTATE does not take the flags in lParam: it wants a pointer to
+        // an LVITEMW. Passing the flags themselves makes comctl32 read address 2 and
+        // the process dies without a word of output.
+        let item = LVITEMW {
+            iItem: index as i32,
+            mask: LVIF_STATE,
+            state: LIST_VIEW_ITEM_STATE_FLAGS(LVNI_SELECTED),
+            stateMask: LIST_VIEW_ITEM_STATE_FLAGS(LVNI_SELECTED),
+            ..Default::default()
+        };
+        send(list, LVM_SETITEMSTATE, index, std::ptr::addr_of!(item) as isize);
+    }
+    let rows = selected_rows(IGNORE_LIST);
+    let names: Vec<String> = rows
+        .iter()
+        .filter_map(|&index| cached_row(IGNORE_LIST, index).map(|row| row.raw))
+        .collect();
+    remove_ignore_rows(&rows);
+    names
 }
 
 unsafe fn copy_row(role: usize, index: Option<usize>) {
@@ -3864,51 +4176,11 @@ unsafe fn copy_visible_rows(role: usize) {
 }
 
 unsafe fn copy_to_clipboard(text: &str) -> bool {
-    // CF_UNICODETEXT must be NUL terminated, and SetClipboardData expects a
-    // GMEM_MOVEABLE block: a GMEM_FIXED buffer with no terminator reads past the
-    // end of the block when the target application calls lstrlenW.
-    let encoded: Vec<u16> = text.encode_utf16().chain(std::iter::once(0u16)).collect();
-    let bytes = encoded.len() * 2;
-
-    // Another process can hold the clipboard for a moment; retry a few times
-    // instead of failing silently.
-    let mut opened = false;
-    for attempt in 0..4 {
-        if OpenClipboard(None).is_ok() {
-            opened = true;
-            break;
-        }
-        if attempt + 1 < 4 {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-    }
-    if !opened {
-        return false;
-    }
-    if EmptyClipboard().is_err() {
-        CloseClipboard().ok();
-        return false;
-    }
-    let Ok(memory) = GlobalAlloc(GMEM_MOVEABLE, bytes) else {
-        CloseClipboard().ok();
-        return false;
-    };
-    let locked = GlobalLock(memory);
-    if locked.is_null() {
-        GlobalFree(Some(memory)).ok();
-        CloseClipboard().ok();
-        return false;
-    }
-    std::ptr::copy_nonoverlapping(encoded.as_ptr() as *const u8, locked as *mut u8, bytes);
-    GlobalUnlock(memory).ok();
-    // On success the clipboard owns the block; only free it when the handover failed.
-    if SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(memory.0))).is_err() {
-        GlobalFree(Some(memory)).ok();
-        CloseClipboard().ok();
-        return false;
-    }
-    CloseClipboard().ok();
-    true
+    // The engine's selection gestures borrow the clipboard too. Going through the
+    // shared writer keeps the two from opening the clipboard at the same time:
+    // one writes while the other is still reading, and the user pastes the wrong
+    // text.
+    crate::win::set_clipboard_text(text)
 }
 
 unsafe fn open_config_file() {
@@ -6112,14 +6384,16 @@ mod tests {
             let after = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
             let _ = DeleteObject(HGDIOBJ(bitmap.0));
             let _ = DeleteDC(dc);
-            // Other tests run in the same process and allocate their own GDI
-            // objects, so the tolerance has to cover their noise: a genuine leak
-            // in `rounded`/`fill_rect`/`draw_text` would add one object per
-            // iteration, i.e. 200+, not a handful.
+            // Signed on purpose: another test in the same process may free its own
+            // objects between the two measurements, and unsigned subtraction would
+            // turn that into a huge "leak". Other tests allocate their own objects,
+            // so the tolerance covers their noise; a genuine leak in
+            // `rounded`/`fill_rect`/`draw_text` would add one object per iteration,
+            // i.e. 200+, not a handful.
+            let leaked = after as i64 - before as i64;
             assert!(
-                after - before <= 40,
-                "200 repaints leaked {} GDI objects (before {before}, after {after})",
-                after - before
+                leaked <= 40,
+                "200 repaints leaked {leaked} GDI objects (before {before}, after {after})"
             );
         }
     }
@@ -6321,15 +6595,11 @@ mod tests {
         // Every declared control must belong to a page group, otherwise it is
         // never hidden and bleeds onto the other pages: the numpad switch used to
         // fall through exactly like that and show up on the Игнорировать page.
-        // The ignore input line is the only exception, it is shown on demand.
         for spec in &CONTROLS {
-            // Header and on-demand controls live outside page groups on purpose:
-            // the config button is painted on every page, the ignore input line
-            // is shown only when the user opens it.
-            if spec.role == BTN_CONFIG
-                || spec.role == IGNORE_INPUT
-                || spec.role == BTN_ADD_COMMIT
-            {
+            // The config button is painted on every page on purpose; everything
+            // else, including the ignore input line and its "Добавить" button, is
+            // now part of a page group.
+            if spec.role == BTN_CONFIG {
                 continue;
             }
             assert!(
@@ -6360,8 +6630,7 @@ mod tests {
             CB_SMART_UNDO,
             BTN_HOTKEY_RESET,
             BTN_ADD_PROCESSES,
-            BTN_ADD_PROCESS,
-            BTN_REMOVE_IGNORE,
+            BTN_DISK,
             BTN_ADD_COMMIT,
             BTN_LOG_REFRESH,
             BTN_LOG_CLEAR,
@@ -6384,6 +6653,40 @@ mod tests {
         // "Добавить" and "Удалить выбранное" sit side by side inside the card.
         assert!(CONTENT_X + 584 + 120 + 12 + 180 <= CONTENT_X + CONTENT_WIDTH);
         assert!(CONTENT_X + CARD_PAD + 556 <= CONTENT_X + 584);
+    }
+
+    #[test]
+    fn the_two_long_lists_are_sorted_by_name() {
+        let row = |name: &str, source: &str| DrawRow {
+            first: name.to_string(),
+            second: source.to_string(),
+            third: String::new(),
+            kind: String::new(),
+            ok: true,
+            raw: name.to_string(),
+        };
+        let mut rows = vec![
+            row("Яндекс.браузер", "процесс"),
+            row("chrome.exe", "процесс"),
+            row("C:\\Soft", "папка"),
+            row("BreakApp.exe", "процесс"),
+        ];
+        sort_rows_by_name(&mut rows);
+        let names: Vec<String> = rows.iter().map(|row| row.first.clone()).collect();
+        assert_eq!(
+            names,
+            vec!["BreakApp.exe", "C:\\Soft", "chrome.exe", "Яндекс.браузер"]
+        );
+    }
+
+    #[test]
+    fn the_disk_picker_stores_processes_and_folders() {
+        // An .exe is stored as the process name the hook sees; a folder is stored
+        // as itself; any other file becomes the folder that contains it.
+        let folder = std::env::temp_dir().to_string_lossy().to_string();
+        assert_eq!(exception_value(&folder), folder);
+        assert_eq!(exception_value("C:\\Games\\BreakApp.exe"), "breakapp.exe");
+        assert_eq!(exception_value("C:\\Games\\readme.txt"), "C:\\Games");
     }
 
     #[test]

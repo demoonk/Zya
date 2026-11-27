@@ -302,41 +302,25 @@ unsafe fn press_alt_shift() {
     std::thread::sleep(std::time::Duration::from_millis(200));
 }
 
-const CF_UNICODETEXT: u32 = 13;
-
 unsafe fn clipboard_text() -> String {
-    use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
-    if OpenClipboard(None).is_err() {
-        return String::new();
-    }
-    let text = match GetClipboardData(CF_UNICODETEXT) {
-        Ok(h) => {
-            let ptr = h.0 as *const u16;
-            let mut out = String::new();
-            if !ptr.is_null() {
-                let mut i = 0usize;
-                while unsafe { *ptr.add(i) } != 0 {
-                    out.push(char::from_u32(unsafe { *ptr.add(i) } as u32).unwrap_or('?'));
-                    i += 1;
-                }
-            }
-            out
-        }
-        Err(_) => String::new(),
-    };
-    let _ = CloseClipboard();
-    text
+    crate::win::clipboard_snapshot().unwrap_or_default()
 }
 
 /// Contents of the Telegram composer, read through select-all + copy.
 unsafe fn composer_text() -> String {
-    use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard};
     use windows::Win32::UI::Input::KeyboardAndMouse::VK_RIGHT;
+    // The probe borrows the clipboard the same way a selection gesture does, so it
+    // takes the same guard: otherwise a gesture running on the side thread could
+    // write into the clipboard between our snapshot and our blanking.
+    let Some(guard) = crate::win::ClipboardGesture::try_acquire() else {
+        return String::new();
+    };
     // Blank the clipboard first: an empty composer would otherwise leave the
-    // previous copy in it and fake a result.
-    OpenClipboard(None).ok();
-    EmptyClipboard().ok();
-    CloseClipboard().ok();
+    // previous copy in it and fake a result. The user's own contents are saved
+    // and handed back afterwards, so the Telegram probe never leaves a copy of
+    // the composer message on the clipboard.
+    let saved = crate::win::clipboard_snapshot();
+    crate::win::clear_clipboard_text();
 
     press_combo2(VK_LCONTROL, VK_A);
     pump_ms(200);
@@ -346,7 +330,17 @@ unsafe fn composer_text() -> String {
     // the whole composer text.
     press_vk(VK_RIGHT);
     pump_ms(150);
-    clipboard_text()
+    let text = clipboard_text();
+    match &saved {
+        Some(previous) => {
+            crate::win::set_clipboard_text(previous);
+        }
+        None => {
+            crate::win::clear_clipboard_text();
+        }
+    }
+    drop(guard);
+    text
 }
 
 unsafe fn focus_composer(hwnd: HWND) {
