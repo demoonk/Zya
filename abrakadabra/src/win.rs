@@ -3,14 +3,14 @@
 //! switches the layout.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, GlobalFree, ERROR_ALREADY_EXISTS, ERROR_SHARING_VIOLATION,
-    GENERIC_READ, GENERIC_WRITE, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, WPARAM,
+    GENERIC_READ, GENERIC_WRITE, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, RECT, WPARAM,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_NONE, OPEN_ALWAYS,
@@ -32,8 +32,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, FindWindowExW, GetClassNameW, GetForegroundWindow,
     GetMessageW, GetWindow, GetWindowLongPtrW, GetWindowTextW, GetWindowThreadProcessId, IsWindow,
     IsWindowVisible, PostMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-    GW_CHILD, GW_HWNDNEXT, GWL_STYLE, HHOOK, KBDLLHOOKSTRUCT, LLKHF_UP, MSG, WH_KEYBOARD_LL,
-    WM_COMMAND, WM_APP,
+    GW_CHILD, GW_HWNDNEXT, GWL_STYLE, HHOOK, KBDLLHOOKSTRUCT, LLKHF_UP, MSG, MOUSEHOOKSTRUCT,
+    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_COMMAND, WM_APP, WM_LBUTTONDOWN, WM_LBUTTONDBLCLK,
+    WM_RBUTTONDOWN, WM_MBUTTONDOWN, GetWindowRect,
 };
 
 use crate::engine::{Config, Decision, Engine};
@@ -1783,7 +1784,95 @@ fn record_flip(a: &mut App, original: &str, converted: &str) {
     }
 }
 
+/// The destructive rewrite below assumes the caret still sits right after the
+/// token the hook tracked. Keys that move the caret are visible to the hook, but
+/// a mouse click moves it invisibly: then the backspaces eat characters from the
+/// middle of the word and the retyped token lands in the wrong place — the
+/// "Break inserted garbage" report. A clipboard probe is not an option: the
+/// classic Win32 Edit control does not extend a selection on Shift+Left, so
+/// Ctrl+C would copy nothing and the check could not tell "no selection" from
+/// "selection somewhere else". The mouse hook is the only reliable signal.
+static MOUSE_HOOK: AtomicUsize = AtomicUsize::new(0);
+/// Set when a click landed in the control that currently owns the caret.
+static CARET_SUSPECT: AtomicBool = AtomicBool::new(false);
+
+unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // L-32: `nCode` is not tested. Mouse events reach this hook with nCode 0
+    // here, so comparing against HC_ACTION would silently drop every click.
+    // The message in `wParam` is the reliable test, and plain cursor movement
+    // is ignored because hovering does not put the caret anywhere.
+    let msg = wparam.0;
+    if msg == WM_LBUTTONDOWN as usize
+        || msg == WM_RBUTTONDOWN as usize
+        || msg == WM_MBUTTONDOWN as usize
+        || msg == WM_LBUTTONDBLCLK as usize
+    {
+        let ms = unsafe { *(lparam.0 as *const MOUSEHOOKSTRUCT) };
+        // `GetFocus` in a hook belongs to *our* thread, not to the application
+        // being typed into, and the hook's `hwnd` is not always a real window
+        // (it can be 0 or an internal handle). The point is always valid, so
+        // the click is attributed to the foreground window by coordinates: a
+        // click inside the window the user is typing in may have moved the
+        // caret anywhere. A click in another window cannot.
+        let fg = unsafe { GetForegroundWindow() };
+        let mut rect = RECT::default();
+        let inside = unsafe {
+            GetWindowRect(fg, &mut rect).is_ok()
+                && ms.pt.x >= rect.left
+                && ms.pt.x < rect.right
+                && ms.pt.y >= rect.top
+                && ms.pt.y < rect.bottom
+        };
+        if verbose() {
+            defer(Deferred::Note(format!(
+                "mouse click {:#06x} at {},{} inside foreground {:?}: {}",
+                msg, ms.pt.x, ms.pt.y, fg, inside
+            )));
+        }
+        if inside {
+            // L-32: the click may have put the caret anywhere, so the token the
+            // keyboard tracking built up is no longer next to it. This is the
+            // same "drop the buffer" rule L-26 applies to caret keys; without it
+            // Break rewrites characters from the middle of the word — the
+            // "Break turned my word into garbage" report.
+            CARET_SUSPECT.store(true, Ordering::Relaxed);
+            let mut a = app().lock().unwrap_or_else(|error| error.into_inner());
+            a.word.clear();
+            a.run.clear();
+            a.closed = None;
+            a.last = None;
+            a.last_boundary = None;
+            a.manual_swap = None;
+            a.selection_done = false;
+        }
+    }
+    CallNextHookEx(None, code, wparam, lparam)
+}
+
+fn caret_suspect() -> bool {
+    CARET_SUSPECT.load(Ordering::Relaxed)
+}
+
+fn caret_suspect_note(a: &App) {
+    if verbose() {
+        defer(Deferred::Note(format!(
+            "break refused: mouse click moved the caret, tracked token {:?}",
+            &a.word
+        )));
+    }
+    unsafe {
+        crate::settings_ui::update_status(
+            "Break: курсор сдвинут мышью — последнее слово не меняется",
+        );
+    }
+}
+
+
 fn swap_last_token(a: &mut App) {
+    if caret_suspect() {
+        caret_suspect_note(a);
+        return;
+    }
     let Some(mv) = crate::layout::plan_manual_move(
         &a.word,
         a.closed.clone(),
@@ -1845,6 +1934,10 @@ fn change_last_case(a: &mut App, op: SelOp) {
     }
 
     let delete = token.chars().count() + boundary.map_or(0, |_| 1);
+    if caret_suspect() {
+        caret_suspect_note(&*a);
+        return;
+    }
     unsafe { rewrite(delete, &transformed, boundary, false) };
 
     a.word.clear();
@@ -1904,6 +1997,14 @@ fn undo_last(a: &mut App, deferred: bool) {
             // Alt+Backspace) while the shortcut modifiers are still physically
             // held, so wait until the user has released them.
             std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+        // The same rule the manual gestures use: if the user clicked somewhere
+        // in the meantime, the backspaces would eat the wrong text.
+        if caret_suspect() {
+            if verbose() {
+                defer(Deferred::Note("undo refused: mouse click moved the caret".into()));
+            }
+            return;
         }
         unsafe { rewrite(delete, &original, boundary, flip) };
     });
@@ -2486,6 +2587,9 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     if verbose() {
         defer(Deferred::Note(format!("key {c:?} langid {lid} word {:?}", &a.word)));
     }
+    // A typed character puts the caret back at the end of the tracked token, so
+    // the mouse click that made the caret position unknown no longer counts.
+    CARET_SUSPECT.store(false, Ordering::Relaxed);
     // ToUnicodeEx inside a low-level hook does not always honour the shift
     // state, so normalise letter case from the modifiers we tracked ourselves.
     if a.mods.shift() && c.is_alphabetic() {
@@ -2847,6 +2951,18 @@ pub fn install_hook() -> anyhow::Result<()> {
         ensure_worker();
         let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0)?;
         HOOK.store(hook.0 as usize, Ordering::Relaxed);
+        // L-32: the mouse hook exists only to notice a click that moves the caret
+        // out of the reach of the keyboard tracking. It never swallows anything.
+        // It is optional: if the system refuses it, everything else keeps working
+        // and the caret gate simply stays closed.
+        match SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), None, 0) {
+            Ok(mouse) => MOUSE_HOOK.store(mouse.0 as usize, Ordering::Relaxed),
+            Err(error) => {
+                if verbose() {
+                    defer(Deferred::Note(format!("mouse hook not installed: {error}")));
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -2856,6 +2972,10 @@ pub fn remove_hook() {
         let h = HOOK.swap(0, Ordering::Relaxed);
         if h != 0 {
             let _ = UnhookWindowsHookEx(HHOOK(h as *mut std::ffi::c_void));
+        }
+        let m = MOUSE_HOOK.swap(0, Ordering::Relaxed);
+        if m != 0 {
+            let _ = UnhookWindowsHookEx(HHOOK(m as *mut std::ffi::c_void));
         }
     }
 }
